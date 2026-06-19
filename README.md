@@ -1,6 +1,6 @@
 # agent-browser-mcp
 
-An [MCP](https://modelcontextprotocol.io/) server that exposes every [agent-browser](https://github.com/anthropics/agent-browser) CLI command as MCP tools. Lets AI assistants control a browser through a standardized tool interface over `stdio`.
+An [MCP](https://modelcontextprotocol.io/) server that exposes every [agent-browser](https://github.com/vercel-labs/agent-browser) CLI command as MCP tools. Lets AI assistants control a browser through a standardized tool interface over `stdio`.
 
 Built with Go, powered by [`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go).
 
