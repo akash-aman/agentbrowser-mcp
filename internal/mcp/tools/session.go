@@ -2,64 +2,66 @@ package tools
 
 import (
 	"context"
-	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
+	"github.com/vercel-labs/agent-browser-mcp/internal/config"
 )
 
-func registerSession(s *server.MCPServer, mgr *browser.Manager) {
-	s.AddTool(mcp.NewTool("session_list",
-		mcp.WithDescription("List all active browser sessions."),
-	), handleSessionList(mgr))
+func (r *Registry) registerSession() {
+	st := config.ToolsetStorage
 
-	s.AddTool(mcp.NewTool("session_info",
-		mcp.WithDescription("Show details about a specific session or the current one."),
-		mcp.WithString("session", mcp.Description("Session name. Shows current if omitted.")),
-	), handleSessionInfo(mgr))
+	r.add(st, mcp.NewTool("session",
+		mcp.WithDescription("Show the current session and URL, list sessions or Chrome profiles, or connect this session to a running browser over CDP (port or ws:// URL)."),
+		mcp.WithString("action", mcp.Enum("info", "list", "profiles", "connect"), mcp.Description("Default info.")),
+		mcp.WithString("target", mcp.Description("connect: CDP port (9222) or WebSocket URL.")),
+		sessionParam(), mutating(),
+	), r.handleSession)
 
-	s.AddTool(mcp.NewTool("profiles_list",
-		mcp.WithDescription("List available Chrome profiles for reuse."),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleProfiles(mgr))
+	r.add(st, mcp.NewTool("auth",
+		mcp.WithDescription("Use login profiles saved with `agent-browser auth save` (secrets never pass through the model): list, show metadata, log in, or delete."),
+		mcp.WithString("action", mcp.Required(), mcp.Enum("list", "show", "login", "delete")),
+		mcp.WithString("name", mcp.Description("show/login/delete: profile name.")),
+		sessionParam(), mutating(),
+	), r.cli(authArgv))
 }
 
-func handleSessionList(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		result, err := mgr.Run(ctx, "", "session", "list")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcp.NewToolResultText(result.Text()), nil
+func sessionArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req)
+	switch b.enum("action", "info", "info", "list", "profiles", "connect") {
+	case "list":
+		b.add("session", "list")
+	case "profiles":
+		b.add("profiles")
+	case "connect":
+		b.add("connect", b.requiredFor("target", "connect"))
+	default:
+		b.add("session")
 	}
+	return b.done()
 }
 
-func handleSessionInfo(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		args := []string{"session"}
-		result, err := mgr.Run(ctx, session, args...)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-
-		var lines []string
-		lines = append(lines, result.Text())
-		lines = append(lines, "")
-
-		r2, _ := mgr.Run(ctx, session, "get", "url")
-		if r2 != nil && r2.Error == "" {
-			lines = append(lines, "Current URL: "+r2.Text())
-		}
-
-		return mcp.NewToolResultText(strings.Join(lines, "\n")), nil
+func (r *Registry) handleSession(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args, err := sessionArgv(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
+	res := r.run(ctx, req, args...)
+	if res.IsError || args[0] != "session" || len(args) > 1 {
+		return res, nil
+	}
+	if url, err := r.mgr.Run(ctx, getSession(req), "get", "url"); err == nil {
+		appendText(res, "url: "+dataField(url.Data, "url"))
+	}
+	return res, nil
 }
 
-func handleProfiles(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return runCmd(ctx, mgr, "", "profiles")
+func authArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "auth")
+	action := b.enum("action", "", "list", "show", "login", "delete")
+	b.add(action)
+	if action != "list" {
+		b.add(b.requiredFor("name", action))
 	}
+	return b.done()
 }

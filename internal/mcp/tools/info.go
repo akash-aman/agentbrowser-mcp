@@ -1,218 +1,141 @@
 package tools
 
 import (
-	"context"
 	"fmt"
+	"slices"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
+	"github.com/vercel-labs/agent-browser-mcp/internal/config"
 )
 
-func registerInfo(s *server.MCPServer, mgr *browser.Manager) {
-	s.AddTool(mcp.NewTool("take_snapshot",
-		mcp.WithDescription("Get the accessibility tree of the current page with refs for interaction. This is the PRIMARY way to understand page structure for non-vision models. Use -i for interactive elements only, -c for compact, -d N for depth limit."),
-		mcp.WithString("session", mcp.Description("Session name.")),
-		mcp.WithBoolean("interactive", mcp.Description("Only show interactive elements (buttons, inputs, links). Recommended for most use cases.")),
-		mcp.WithBoolean("compact", mcp.Description("Remove empty structural elements.")),
+func (r *Registry) registerInfo() {
+	core := config.ToolsetCore
+
+	r.add(core, mcp.NewTool("snapshot",
+		mcp.WithDescription("Accessibility tree with @refs — the primary way to see page structure and get targets for click/fill. Cheaper than screenshot; scope with selector or interactive:true on big pages, and re-read with delta:true to get only what changed."),
+		mcp.WithBoolean("interactive", mcp.Description("Only buttons, inputs, links.")),
+		mcp.WithBoolean("compact", mcp.Description("Drop empty structural nodes. Default true.")),
 		mcp.WithNumber("depth", mcp.Description("Limit tree depth.")),
-		mcp.WithString("selector", mcp.Description("Scope to a CSS selector.")),
-		mcp.WithBoolean("urls", mcp.Description("Include href URLs for link elements.")),
-	), handleSnapshot(mgr))
+		mcp.WithString("selector", mcp.Description("Scope to a CSS selector or @ref.")),
+		mcp.WithBoolean("urls", mcp.Description("Include link hrefs.")),
+		mcp.WithBoolean("delta", mcp.Description("Only @refs added/changed/removed since the last delta snapshot; full tree on the first call, after navigation or when options change.")),
+		mcp.WithBoolean("full", mcp.Description("With delta: return the full tree and reset the baseline.")),
+		sessionParam(), readOnly(),
+	), r.cli(snapshotArgv))
 
-	s.AddTool(mcp.NewTool("get_text",
-		mcp.WithDescription("Get the text content of an element."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector (@ref, CSS, etc.).")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetText(mgr))
+	r.add(core, mcp.NewTool("page_text",
+		mcp.WithDescription("Readable text of the page or one element. Prefer over snapshot when you only need to read content."),
+		mcp.WithString("selector", mcp.Description("@ref or CSS selector. Default body.")),
+		sessionParam(), readOnly(),
+	), r.cli(pageTextArgv))
 
-	s.AddTool(mcp.NewTool("get_html",
-		mcp.WithDescription("Get the innerHTML of an element."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetHTML(mgr))
-
-	s.AddTool(mcp.NewTool("get_value",
-		mcp.WithDescription("Get the current value of an input element."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Input element selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetValue(mgr))
-
-	s.AddTool(mcp.NewTool("get_attribute",
-		mcp.WithDescription("Get an attribute value from an element."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector.")),
-		mcp.WithString("attribute", mcp.Required(), mcp.Description("Attribute name (e.g., href, class, src).")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetAttr(mgr))
-
-	s.AddTool(mcp.NewTool("get_page_title",
-		mcp.WithDescription("Get the current page title."),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetTitle(mgr))
-
-	s.AddTool(mcp.NewTool("get_current_url",
-		mcp.WithDescription("Get the current page URL."),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetURL(mgr))
-
-	s.AddTool(mcp.NewTool("get_cdp_url",
-		mcp.WithDescription("Get the Chrome DevTools Protocol WebSocket URL for direct CDP access."),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetCDPURL(mgr))
-
-	s.AddTool(mcp.NewTool("get_element_count",
-		mcp.WithDescription("Count how many elements match a selector."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetCount(mgr))
-
-	s.AddTool(mcp.NewTool("get_bounding_box",
-		mcp.WithDescription("Get the bounding box of an element (x, y, width, height)."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetBox(mgr))
-
-	s.AddTool(mcp.NewTool("get_computed_styles",
-		mcp.WithDescription("Get computed CSS styles of an element."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleGetStyles(mgr))
-
-	s.AddTool(mcp.NewTool("is_visible",
-		mcp.WithDescription("Check if an element is currently visible."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleIsVisible(mgr))
-
-	s.AddTool(mcp.NewTool("is_enabled",
-		mcp.WithDescription("Check if an element is enabled."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleIsEnabled(mgr))
-
-	s.AddTool(mcp.NewTool("is_checked",
-		mcp.WithDescription("Check if a checkbox/radio is checked."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Checkbox/radio selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleIsChecked(mgr))
+	r.add(core, mcp.NewTool("get",
+		mcp.WithDescription("Read one property of an element or the page: text, html, value, attr, count, box, styles, visible/enabled/checked, or page title/url/cdp_url."),
+		mcp.WithString("what", mcp.Required(), mcp.Enum(getWhats...)),
+		selectorParam(false),
+		mcp.WithString("attribute", mcp.Description("Attribute name for what=attr.")),
+		sessionParam(), readOnly(),
+	), r.cli(getArgv))
 }
 
-func handleSnapshot(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		args := []string{"snapshot"}
-		if request.GetBool("interactive", false) {
-			args = append(args, "-i")
-		}
-		if request.GetBool("compact", false) {
-			args = append(args, "-c")
-		}
-		if d := request.GetFloat("depth", 0); d > 0 {
-			args = append(args, "-d", intToStr(int(d)))
-		}
-		if sel := request.GetString("selector", ""); sel != "" {
-			args = append(args, "-s", sel)
-		}
-		if request.GetBool("urls", false) {
-			args = append(args, "--urls")
-		}
-		return runCmd(ctx, mgr, session, args...)
+var getWhats = []string{"text", "html", "value", "attr", "title", "url", "count", "box", "styles", "cdp_url", "visible", "enabled", "checked"}
+
+func snapshotArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "snapshot").boolFlag("-i", "interactive")
+	if req.GetBool("compact", true) {
+		b.add("-c")
 	}
+	b.intFlag("-d", "depth").flag("-s", "selector").boolFlag("--urls", "urls")
+	if b.boolean("delta") || b.boolean("full") {
+		b.add("--delta").boolFlag("--full", "full")
+	}
+	return b.done()
 }
 
-func handleGetText(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, getSession(request), "get", "text", selector)
-	}
+func pageTextArgv(req mcp.CallToolRequest) ([]string, error) {
+	return []string{"get", "text", req.GetString("selector", "body")}, nil
 }
 
-func handleGetHTML(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, getSession(request), "get", "html", selector)
+func getArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req)
+	switch what := b.enum("what", "", getWhats...); what {
+	case "title", "url":
+		b.add("get", what)
+	case "cdp_url":
+		b.add("get", "cdp-url")
+	case "visible", "enabled", "checked":
+		b.add("is", what, b.requiredFor("selector", "what="+what))
+	case "attr":
+		b.add("get", "attr", b.requiredFor("selector", "what=attr"), b.requiredFor("attribute", "what=attr"))
+	default:
+		b.add("get", what, b.requiredFor("selector", "what="+what))
 	}
+	return b.done()
 }
 
-func handleGetValue(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, getSession(request), "get", "value", selector)
-	}
+func (r *Registry) registerFind() {
+	r.add(config.ToolsetCore, mcp.NewTool("find",
+		mcp.WithDescription("Locate an element semantically (role, text, label, placeholder, alt, title, testid, first/last/nth CSS match) and act on it in one call. Use when you know what the element says but have no @ref; by=all returns text of every CSS match."),
+		mcp.WithString("by", mcp.Required(), mcp.Enum(findBys...)),
+		mcp.WithString("value", mcp.Required(), mcp.Description("Role, text, label, placeholder, alt, title, test id, or CSS selector for first/last/nth/all.")),
+		mcp.WithString("action", mcp.Enum(findActions...), mcp.Description("Default click. text returns the element's text.")),
+		mcp.WithString("input", mcp.Description("Text for fill/type.")),
+		mcp.WithString("name", mcp.Description("Accessible name filter for by=role.")),
+		mcp.WithBoolean("exact", mcp.Description("Exact text match.")),
+		mcp.WithNumber("index", mcp.Description("0-based index for by=nth.")),
+		snapshotParam(), sessionParam(), mutating(),
+	), r.action(findArgv))
 }
 
-func handleGetAttr(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		attr, _ := request.RequireString("attribute")
-		return runCmd(ctx, mgr, getSession(request), "get", "attr", selector, attr)
+var (
+	findBys     = []string{"role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last", "nth", "all"}
+	findActions = []string{"click", "fill", "type", "hover", "focus", "check", "uncheck", "text"}
+	exactBys    = []string{"role", "text", "label", "placeholder", "alt", "title"}
+)
+
+func findArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req)
+	by := b.enum("by", "", findBys...)
+	value := b.required("value")
+	if by == "all" {
+		// The CLI has no "find all"; read every match's text in one eval.
+		return b.add("eval", fmt.Sprintf("Array.from(document.querySelectorAll(%s), e => e.innerText.trim())", jsString(value))).done()
 	}
+	action := b.enum("action", "click", findActions...)
+
+	b.add("find", by)
+	if by == "nth" {
+		b.add(b.indexArg())
+	}
+	b.add(value, action)
+	if action == "fill" || action == "type" {
+		b.add(b.inputArg(action))
+	}
+	if by == "role" {
+		b.flag("--name", "name")
+	}
+	if slices.Contains(exactBys, by) {
+		b.boolFlag("--exact", "exact")
+	}
+	return b.done()
 }
 
-func handleGetTitle(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return runCmd(ctx, mgr, getSession(request), "get", "title")
+func (b *argv) indexArg() string {
+	if !b.has("index") {
+		b.fail(fmt.Errorf("index is required for by=nth"))
 	}
+	return b.int("index")
 }
 
-func handleGetURL(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return runCmd(ctx, mgr, getSession(request), "get", "url")
+func (b *argv) inputArg(action string) string {
+	if !b.has("input") {
+		b.fail(fmt.Errorf("input is required for action %s", action))
 	}
+	return b.str("input")
 }
 
-func handleGetCDPURL(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return runCmd(ctx, mgr, getSession(request), "get", "cdp-url")
-	}
-}
-
-func handleGetCount(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, getSession(request), "get", "count", selector)
-	}
-}
-
-func handleGetBox(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, getSession(request), "get", "box", selector)
-	}
-}
-
-func handleGetStyles(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, getSession(request), "get", "styles", selector)
-	}
-}
-
-func handleIsVisible(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, getSession(request), "is", "visible", selector)
-	}
-}
-
-func handleIsEnabled(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, getSession(request), "is", "enabled", selector)
-	}
-}
-
-func handleIsChecked(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, getSession(request), "is", "checked", selector)
-	}
-}
-
-func intToStr(n int) string {
-	if n < 0 {
-		return "0"
-	}
-	return fmt.Sprintf("%d", n)
+// jsString quotes s as a JavaScript string literal.
+func jsString(s string) string {
+	return compactJSON(s)
 }

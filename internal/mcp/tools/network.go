@@ -2,126 +2,101 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
+	"github.com/vercel-labs/agent-browser-mcp/internal/config"
 )
 
-func registerNetwork(s *server.MCPServer, mgr *browser.Manager) {
-	s.AddTool(mcp.NewTool("network_requests",
-		mcp.WithDescription("View tracked network requests. Use filters to narrow results. CRUCIAL for non-vision models to trace API calls, request/response headers, and status codes."),
-		mcp.WithString("filter", mcp.Description("Text filter (matches in URL).")),
-		mcp.WithString("type", mcp.Description("Filter by resource type: xhr, fetch, document, script, stylesheet, image, etc. Comma-separated.")),
-		mcp.WithString("method", mcp.Description("Filter by HTTP method: GET, POST, PUT, DELETE, PATCH.")),
-		mcp.WithString("status", mcp.Description("Filter by status: e.g., 200, 2xx, 400, 400-499.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleNetworkRequests(mgr))
-
-	s.AddTool(mcp.NewTool("network_request_detail",
-		mcp.WithDescription("Get full request/response detail for a specific network request by its requestId (from network_requests). Shows headers, body, timing."),
-		mcp.WithString("requestId", mcp.Required(), mcp.Description("The request ID from network_requests output.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleNetworkRequest(mgr))
-
-	s.AddTool(mcp.NewTool("network_route",
-		mcp.WithDescription("Intercept and optionally modify or block network requests. Use '*' for all URLs."),
-		mcp.WithString("url", mcp.Required(), mcp.Description("URL pattern to intercept. Use '*' for all.")),
-		mcp.WithBoolean("abort", mcp.Description("Block matching requests.")),
-		mcp.WithString("body", mcp.Description("JSON body to respond with (mock).")),
-		mcp.WithString("resourceType", mcp.Description("Only intercept specific resource types: script, stylesheet, image, etc.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleNetworkRoute(mgr))
-
-	s.AddTool(mcp.NewTool("network_unroute",
-		mcp.WithDescription("Remove network route/block rules. If no URL given, removes all."),
-		mcp.WithString("url", mcp.Description("URL pattern to unroute. Removes all if omitted.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleNetworkUnroute(mgr))
-
-	s.AddTool(mcp.NewTool("network_har_start",
-		mcp.WithDescription("Start recording network traffic in HAR format for detailed analysis."),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleHARStart(mgr))
-
-	s.AddTool(mcp.NewTool("network_har_stop",
-		mcp.WithDescription("Stop HAR recording and save to a file. Output path shows where to find the HAR file."),
-		mcp.WithString("path", mcp.Description("Output file path. Saves to temp if omitted.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleHARStop(mgr))
+func (r *Registry) registerNetwork() {
+	r.add(config.ToolsetNetwork, mcp.NewTool("network",
+		mcp.WithDescription("Trace or mock network traffic: requests lists one line per request (id method status type url), detail shows headers and body for one id. Narrow with filter/type/method/status and limit."),
+		mcp.WithString("action", mcp.Enum(networkActions...), mcp.Description("Default requests.")),
+		mcp.WithString("filter", mcp.Description("requests: URL substring.")),
+		mcp.WithString("type", mcp.Description("requests: resource types, e.g. xhr,fetch,document.")),
+		mcp.WithString("method", mcp.Description("requests: HTTP method.")),
+		mcp.WithString("status", mcp.Description("requests: status, e.g. 200, 2xx, 400-499.")),
+		mcp.WithNumber("limit", mcp.Description("requests: at most the last N. Default 50.")),
+		mcp.WithBoolean("clear", mcp.Description("requests: clear the log after reading.")),
+		mcp.WithString("requestId", mcp.Description("detail: id from requests.")),
+		mcp.WithString("url", mcp.Description("route/unroute: URL pattern, * for all.")),
+		mcp.WithBoolean("abort", mcp.Description("route: block matching requests.")),
+		mcp.WithString("body", mcp.Description("route: JSON body to respond with.")),
+		mcp.WithString("resourceType", mcp.Description("route: only these resource types.")),
+		mcp.WithString("path", mcp.Description("har_stop: output file.")),
+		sessionParam(), mutating(),
+	), r.handleNetwork)
 }
 
-func handleNetworkRequests(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		args := []string{"network", "requests"}
-		if filter := request.GetString("filter", ""); filter != "" {
-			args = append(args, "--filter", filter)
-		}
-		if typ := request.GetString("type", ""); typ != "" {
-			args = append(args, "--type", typ)
-		}
-		if method := request.GetString("method", ""); method != "" {
-			args = append(args, "--method", method)
-		}
-		if status := request.GetString("status", ""); status != "" {
-			args = append(args, "--status", status)
-		}
-		return runCmd(ctx, mgr, session, args...)
+var networkActions = []string{"requests", "detail", "route", "unroute", "har_start", "har_stop"}
+
+func networkArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "network")
+	switch b.enum("action", "requests", networkActions...) {
+	case "detail":
+		b.add("request", b.requiredFor("requestId", "detail"))
+	case "route":
+		b.add("route", b.requiredFor("url", "route")).
+			boolFlag("--abort", "abort").flag("--body", "body").flag("--resource-type", "resourceType")
+	case "unroute":
+		b.add("unroute").opt("url")
+	case "har_start":
+		b.add("har", "start")
+	case "har_stop":
+		b.add("har", "stop").opt("path")
+	default:
+		b.add("requests").flag("--filter", "filter").flag("--type", "type").
+			flag("--method", "method").flag("--status", "status")
 	}
+	return b.done()
 }
 
-func handleNetworkRequest(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		reqID, _ := request.RequireString("requestId")
-		return runCmd(ctx, mgr, session, "network", "request", reqID)
-	}
+type networkData struct {
+	Requests []struct {
+		RequestID    string `json:"requestId"`
+		Method       string `json:"method"`
+		Status       any    `json:"status"`
+		ResourceType string `json:"resourceType"`
+		URL          string `json:"url"`
+	} `json:"requests"`
 }
 
-func handleNetworkRoute(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		url, _ := request.RequireString("url")
-		args := []string{"network", "route", url}
-		if request.GetBool("abort", false) {
-			args = append(args, "--abort")
-		}
-		if body := request.GetString("body", ""); body != "" {
-			args = append(args, "--body", body)
-		}
-		if rt := request.GetString("resourceType", ""); rt != "" {
-			args = append(args, "--resource-type", rt)
-		}
-		return runCmd(ctx, mgr, session, args...)
+func (r *Registry) handleNetwork(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args, err := networkArgv(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
+	if args[1] != "requests" {
+		return r.run(ctx, req, args...), nil
+	}
+
+	out, err := r.mgr.Run(ctx, getSession(req), args...)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	var data networkData
+	if err := json.Unmarshal(out.Data, &data); err != nil {
+		return textResult(formatData(out.Data), r.cfg.MaxOutput), nil
+	}
+	filter := lineFilter{limit: int(req.GetFloat("limit", 50)), noun: "requests"}
+	text := filter.apply(data.lines())
+	if req.GetBool("clear", false) {
+		text += r.clearBuffer(ctx, req, "network", "requests", "--clear")
+	}
+	return textResult(text, r.cfg.MaxOutput), nil
 }
 
-func handleNetworkUnroute(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		url := request.GetString("url", "")
-		if url != "" {
-			return runCmd(ctx, mgr, session, "network", "unroute", url)
+// lines renders one request per line: id method status type url.
+func (d networkData) lines() []string {
+	lines := make([]string, 0, len(d.Requests))
+	for _, q := range d.Requests {
+		status := "pending"
+		if q.Status != nil {
+			status = fmt.Sprint(q.Status)
 		}
-		return runCmd(ctx, mgr, session, "network", "unroute")
+		lines = append(lines, fmt.Sprintf("%s %s %s %s %s", q.RequestID, q.Method, status, q.ResourceType, q.URL))
 	}
-}
-
-func handleHARStart(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return runCmd(ctx, mgr, getSession(request), "network", "har", "start")
-	}
-}
-
-func handleHARStop(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		path := request.GetString("path", "")
-		if path != "" {
-			return runCmd(ctx, mgr, session, "network", "har", "stop", path)
-		}
-		return runCmd(ctx, mgr, session, "network", "har", "stop")
-	}
+	return lines
 }
