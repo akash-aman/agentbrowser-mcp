@@ -3,75 +3,91 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
+	"github.com/vercel-labs/agent-browser-mcp/internal/config"
 )
 
-func registerMouse(s *server.MCPServer, mgr *browser.Manager) {
-	s.AddTool(mcp.NewTool("mouse_move",
-		mcp.WithDescription("Move the mouse to specific coordinates."),
-		mcp.WithNumber("x", mcp.Required(), mcp.Description("X coordinate.")),
-		mcp.WithNumber("y", mcp.Required(), mcp.Description("Y coordinate.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleMouseMove(mgr))
-
-	s.AddTool(mcp.NewTool("mouse_down",
-		mcp.WithDescription("Press a mouse button at the current position."),
-		mcp.WithString("button", mcp.Description("Mouse button: 'left' (default), 'right', 'middle'.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleMouseDown(mgr))
-
-	s.AddTool(mcp.NewTool("mouse_up",
-		mcp.WithDescription("Release a mouse button."),
-		mcp.WithString("button", mcp.Description("Mouse button: 'left' (default), 'right', 'middle'.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleMouseUp(mgr))
-
-	s.AddTool(mcp.NewTool("mouse_wheel",
-		mcp.WithDescription("Scroll the mouse wheel."),
-		mcp.WithNumber("deltaY", mcp.Required(), mcp.Description("Vertical scroll delta.")),
-		mcp.WithNumber("deltaX", mcp.Description("Horizontal scroll delta.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleMouseWheel(mgr))
+func (r *Registry) registerMouse() {
+	r.add(config.ToolsetCore, mcp.NewTool("mouse",
+		mcp.WithDescription("Low-level mouse at viewport coordinates. Fallback for canvas, maps or targets with no @ref — prefer click @ref."),
+		mcp.WithString("action", mcp.Required(), mcp.Enum("click", "move", "down", "up", "wheel")),
+		mcp.WithNumber("x", mcp.Description("X for click/move.")),
+		mcp.WithNumber("y", mcp.Description("Y for click/move.")),
+		mcp.WithString("button", mcp.Enum("left", "right", "middle"), mcp.Description("Default left.")),
+		mcp.WithNumber("deltaX", mcp.Description("Horizontal wheel delta.")),
+		mcp.WithNumber("deltaY", mcp.Description("Vertical wheel delta.")),
+		mcp.WithBoolean("human", mcp.Description("click/move: follow a human-like eased curve.")),
+		mcp.WithNumber("seed", mcp.Description("With human: seed that makes the path reproducible.")),
+		mcp.WithNumber("duration", mcp.Description("click/move: movement time in ms.")),
+		sessionParam(), mutating(),
+	), r.handleMouse)
 }
 
-func handleMouseMove(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		x := request.GetFloat("x", 0)
-		y := request.GetFloat("y", 0)
-		return runCmd(ctx, mgr, session, "mouse", "move", fmt.Sprintf("%d", int(x)), fmt.Sprintf("%d", int(y)))
+// mouseArgv returns one argv per CLI call; click is move + down + up.
+func mouseArgv(req mcp.CallToolRequest) ([][]string, error) {
+	b := newArgv(req)
+	action := b.enum("action", "", "click", "move", "down", "up", "wheel")
+	button := b.enum("button", "left", "left", "right", "middle")
+	var steps [][]string
+	switch action {
+	case "down", "up":
+		steps = [][]string{{"mouse", action, button}}
+	case "wheel":
+		steps = [][]string{b.wheel()}
+	case "move":
+		steps = [][]string{b.moveTo(action)}
+	case "click":
+		steps = [][]string{b.moveTo(action), {"mouse", "down", button}, {"mouse", "up", button}}
 	}
-}
-
-func handleMouseDown(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		button := request.GetString("button", "left")
-		return runCmd(ctx, mgr, session, "mouse", "down", button)
+	if _, err := b.done(); err != nil {
+		return nil, err
 	}
+	return steps, nil
 }
 
-func handleMouseUp(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		button := request.GetString("button", "left")
-		return runCmd(ctx, mgr, session, "mouse", "up", button)
+func (b *argv) moveTo(action string) []string {
+	if !b.has("x") || !b.has("y") {
+		b.fail(fmt.Errorf("x and y are required for %s", action))
 	}
-}
-
-func handleMouseWheel(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		dy := request.GetFloat("deltaY", 0)
-		dx := request.GetFloat("deltaX", 0)
-		args := []string{"mouse", "wheel", fmt.Sprintf("%d", int(dy))}
-		if dx != 0 {
-			args = append(args, fmt.Sprintf("%d", int(dx)))
+	step := []string{"mouse", "move", b.int("x"), b.int("y")}
+	if b.boolean("human") {
+		step = append(step, "--human")
+	}
+	for _, f := range []struct{ flag, key string }{{"--seed", "seed"}, {"--duration", "duration"}} {
+		if b.has(f.key) {
+			step = append(step, f.flag, b.int(f.key))
 		}
-		return runCmd(ctx, mgr, session, args...)
 	}
+	return step
+}
+
+func (b *argv) wheel() []string {
+	if !b.has("deltaY") && !b.has("deltaX") {
+		b.fail(fmt.Errorf("deltaY or deltaX is required for wheel"))
+	}
+	step := []string{"mouse", "wheel", b.int("deltaY")}
+	if b.has("deltaX") {
+		step = append(step, b.int("deltaX"))
+	}
+	return step
+}
+
+func (r *Registry) handleMouse(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	steps, err := mouseArgv(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	var res *mcp.CallToolResult
+	for _, args := range steps {
+		if res = r.run(ctx, req, args...); res.IsError {
+			return res, nil
+		}
+	}
+	if req.GetString("action", "") == "click" {
+		res = mcp.NewToolResultText(fmt.Sprintf("clicked at %s\n%s", strings.Join(steps[0][2:], ","), hintMouseClick))
+	}
+	return res, nil
 }

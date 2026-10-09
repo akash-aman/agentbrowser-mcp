@@ -4,10 +4,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/mark3labs/mcp-go/server"
 
@@ -16,7 +15,7 @@ import (
 	mcpsrv "github.com/vercel-labs/agent-browser-mcp/internal/mcp"
 )
 
-const version = "1.0.0"
+const version = "2.0.0"
 
 func main() {
 	cfg, err := config.Load(os.Args[1:])
@@ -26,23 +25,15 @@ func main() {
 	}
 
 	mgr := browser.NewManager(cfg)
+	s, shutdown := mcpsrv.NewServer(version, cfg, mgr)
 
-	// Clean up sessions on shutdown.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		fmt.Fprintln(os.Stderr, "agent-browser-mcp: shutting down, closing browser sessions...")
-		mgr.CloseAll(context.Background())
-		os.Exit(0)
-	}()
-
-	fmt.Fprintf(os.Stderr, "agent-browser-mcp: listening on stdio\n")
-
-	s := mcpsrv.NewServer(version, cfg, mgr)
-	if err := server.ServeStdio(s); err != nil {
+	fmt.Fprintf(os.Stderr, "agent-browser-mcp %s: listening on stdio; %s\n", version, mgr.CheckVersion(context.Background()))
+	// ServeStdio returns when stdin closes or on SIGINT/SIGTERM, which it
+	// traps itself (as context.Canceled); both are a normal stop.
+	err = server.ServeStdio(s)
+	shutdown(context.Background())
+	if err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "agent-browser-mcp: server error:", err)
-		mgr.CloseAll(context.Background())
 		os.Exit(1)
 	}
 }

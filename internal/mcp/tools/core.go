@@ -2,345 +2,297 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
+	"github.com/vercel-labs/agent-browser-mcp/internal/config"
 )
 
-// shared helper: run agent-browser and return text
-func runCmd(ctx context.Context, mgr *browser.Manager, session string, args ...string) (*mcp.CallToolResult, error) {
-	result, err := mgr.Run(ctx, session, args...)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if result.Error != "" {
-		return mcp.NewToolResultError(result.Error), nil
-	}
-	return mcp.NewToolResultText(result.Text()), nil
-}
+// registerCore adds navigation and element interaction tools.
+func (r *Registry) registerCore() {
+	core := config.ToolsetCore
 
-// getSession extracts the optional "session" parameter from a request.
-func getSession(request mcp.CallToolRequest) string {
-	return request.GetString("session", "")
-}
+	r.add(core, mcp.NewTool("navigate",
+		mcp.WithDescription("Open a URL, or go back/forward/reload, or do SPA client-side navigation (pushstate)."),
+		mcp.WithString("url", mcp.Description("Target URL. Required for goto and pushstate.")),
+		mcp.WithString("action", mcp.Enum(navigateActions...), mcp.Description("Default goto.")),
+		mcp.WithString("headers", mcp.Description("goto: JSON object of HTTP headers sent only to this URL's origin, e.g. an Authorization bearer token.")),
+		snapshotParam(), sessionParam(), mutating(),
+	), r.action(navigateArgv))
 
-// registerCore adds core interaction tools.
-func registerCore(s *server.MCPServer, mgr *browser.Manager) {
-	// navigate_page
-	s.AddTool(mcp.NewTool("navigate_page",
-		mcp.WithDescription("Navigate to a URL, or go back/forward/reload. Use 'url' type for new URLs, 'back', 'forward', or 'reload' for history navigation."),
-		mcp.WithString("url", mcp.Description("Target URL. Required when type is 'url'.")),
-		mcp.WithString("type", mcp.Description("Navigation type. Default 'url' if URL is provided. Also supports 'back', 'forward', 'reload'.")),
-		mcp.WithString("session", mcp.Description("Session name for isolated browser instance.")),
-		mcp.WithNumber("timeout", mcp.Description("Max wait time in milliseconds.")),
-		mcp.WithBoolean("ignoreCache", mcp.Description("Whether to ignore cache on reload.")),
-	), handleNavigatePage(mgr))
+	r.add(core, mcp.NewTool("click",
+		mcp.WithDescription("Click an element. Prefer @ref from snapshot; set snapshot:\"delta\" to see the effect in the same call."),
+		selectorParam(true),
+		mcp.WithBoolean("double", mcp.Description("Double-click.")),
+		mcp.WithBoolean("newTab", mcp.Description("Open the link in a new tab.")),
+		humanParam(),
+		snapshotParam(), sessionParam(), mutating(),
+	), r.visibleOnly(clickTarget, clickArgv))
 
-	// click
-	s.AddTool(mcp.NewTool("click",
-		mcp.WithDescription("Click an element on the page. Use refs (@e1, @e2) from a snapshot, or CSS selectors (#id, .class)."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector: @ref from snapshot, CSS selector, text= selector, or xpath= selector.")),
-		mcp.WithString("session", mcp.Description("Session name for isolated browser instance.")),
-		mcp.WithBoolean("newTab", mcp.Description("Open the link in a new tab instead of the current tab.")),
-	), handleClick(mgr))
+	r.add(core, mcp.NewTool("fill",
+		mcp.WithDescription("Clear an input and set its value. For several fields, put fills in one batch call."),
+		selectorParam(true),
+		mcp.WithString("value", mcp.Required(), mcp.Description("Value to set.")),
+		snapshotParam(), sessionParam(), mutating(),
+	), r.visibleOnly(fillTarget, fillArgv))
 
-	// dblclick
-	s.AddTool(mcp.NewTool("double_click",
-		mcp.WithDescription("Double-click an element on the page."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector (ref, CSS, text=, xpath=).")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleDblClick(mgr))
-
-	// fill
-	s.AddTool(mcp.NewTool("fill",
-		mcp.WithDescription("Clear and fill an input field. Use refs (@e3) from snapshot or CSS selectors."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Input element selector.")),
-		mcp.WithString("value", mcp.Required(), mcp.Description("Value to fill into the element.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleFill(mgr))
-
-	// type_text
-	s.AddTool(mcp.NewTool("type_text",
-		mcp.WithDescription("Type into an element (without clearing first). Use for incremental text input."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector.")),
+	r.add(core, mcp.NewTool("type",
+		mcp.WithDescription("Type text without clearing. mode element types into selector; keystrokes/insert type at current focus (insert skips key events)."),
 		mcp.WithString("text", mcp.Required(), mcp.Description("Text to type.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleType(mgr))
+		selectorParam(false),
+		mcp.WithString("mode", mcp.Enum("element", "keystrokes", "insert"), mcp.Description("Default element when selector is set, else keystrokes.")),
+		snapshotParam(), sessionParam(), mutating(),
+	), r.visibleOnly(typeTarget, typeArgv))
 
-	// press_key
-	s.AddTool(mcp.NewTool("press_key",
-		mcp.WithDescription("Press a key or key combination (e.g., Enter, Tab, Control+a, Meta+Shift+R)."),
-		mcp.WithString("key", mcp.Required(), mcp.Description("Key or combination to press. Modifiers: Control, Shift, Alt, Meta.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handlePressKey(mgr))
+	r.add(core, mcp.NewTool("press_key",
+		mcp.WithDescription("Press a key or combo (Enter, Tab, Control+a), or hold/release one with down/up."),
+		mcp.WithString("key", mcp.Required(), mcp.Description("Key or combination. Modifiers: Control, Shift, Alt, Meta.")),
+		mcp.WithString("action", mcp.Enum("press", "down", "up"), mcp.Description("Default press.")),
+		snapshotParam(), sessionParam(), mutating(),
+	), r.action(pressKeyArgv))
 
-	// hover
-	s.AddTool(mcp.NewTool("hover",
-		mcp.WithDescription("Hover over an element on the page."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleHover(mgr))
+	r.add(core, mcp.NewTool("element_action",
+		mcp.WithDescription("Hover, focus, check, uncheck, scroll into view, or highlight an element."),
+		selectorParam(true),
+		mcp.WithString("action", mcp.Required(), mcp.Enum(elementActions...)),
+		snapshotParam(), sessionParam(), mutating(),
+	), r.visibleOnly(hoverTarget, elementActionArgv))
 
-	// focus
-	s.AddTool(mcp.NewTool("focus",
-		mcp.WithDescription("Focus an element on the page."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector to focus.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleFocus(mgr))
+	r.add(core, mcp.NewTool("select_option",
+		mcp.WithDescription("Select one or more options in a <select> by value."),
+		selectorParam(true),
+		mcp.WithArray("values", mcp.Required(), mcp.WithStringItems(), mcp.Description("Option values to select.")),
+		snapshotParam(), sessionParam(), mutating(),
+	), r.action(selectArgv))
 
-	// check
-	s.AddTool(mcp.NewTool("check",
-		mcp.WithDescription("Check a checkbox or radio button."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Checkbox/radio selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleCheck(mgr))
+	r.add(core, mcp.NewTool("scroll",
+		mcp.WithDescription("Scroll the page or a scrollable element. To reach a known element, prefer element_action scroll_into_view."),
+		mcp.WithString("direction", mcp.Enum("up", "down", "left", "right"), mcp.Description("Default down.")),
+		mcp.WithNumber("px", mcp.Description("Pixels to scroll. Default 300.")),
+		mcp.WithString("selector", mcp.Description("CSS selector of a scrollable container.")),
+		sessionParam(), mutating(),
+	), r.cli(scrollArgv))
 
-	// uncheck
-	s.AddTool(mcp.NewTool("uncheck",
-		mcp.WithDescription("Uncheck a checkbox."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Checkbox selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleUncheck(mgr))
+	r.add(core, mcp.NewTool("drag",
+		mcp.WithDescription("Drag one element onto another."),
+		mcp.WithString("source", mcp.Required(), mcp.Description("Source @ref or selector.")),
+		mcp.WithString("target", mcp.Required(), mcp.Description("Target @ref or selector.")),
+		humanParam(),
+		snapshotParam(), sessionParam(), mutating(),
+	), r.action(dragArgv))
 
-	// select_option
-	s.AddTool(mcp.NewTool("select_option",
-		mcp.WithDescription("Select a dropdown option by value."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Select element selector.")),
-		mcp.WithString("value", mcp.Required(), mcp.Description("Option value to select.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleSelect(mgr))
+	r.add(core, mcp.NewTool("upload_file",
+		mcp.WithDescription("Set files on a file input."),
+		selectorParam(true),
+		mcp.WithArray("files", mcp.Required(), mcp.WithStringItems(), mcp.Description("Absolute file paths.")),
+		sessionParam(), mutating(),
+	), r.cli(uploadArgv))
 
-	// scroll
-	s.AddTool(mcp.NewTool("scroll",
-		mcp.WithDescription("Scroll the page or a specific element."),
-		mcp.WithString("direction", mcp.Required(), mcp.Description("Scroll direction: up, down, left, right.")),
-		mcp.WithNumber("px", mcp.Description("Pixels to scroll. Default: full page.")),
-		mcp.WithString("selector", mcp.Description("Optional selector to scroll a specific element.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleScroll(mgr))
+	r.add(core, mcp.NewTool("download",
+		mcp.WithDescription("Click an element that triggers a download and save the file."),
+		selectorParam(true),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Where to save the file.")),
+		sessionParam(), mutating(),
+	), r.cli(downloadArgv))
 
-	// scroll_into_view
-	s.AddTool(mcp.NewTool("scroll_into_view",
-		mcp.WithDescription("Scroll an element into view."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("Element selector to scroll into view.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleScrollIntoView(mgr))
+	r.add(core, mcp.NewTool("eval_script",
+		mcp.WithDescription("Run JavaScript in the page and return the result. Fallback — prefer get, find or page_text, which are cheaper and safer."),
+		mcp.WithString("script", mcp.Required(), mcp.Description("JavaScript expression or statements.")),
+		sessionParam(), mutating(),
+	), r.cli(evalArgv))
 
-	// drag
-	s.AddTool(mcp.NewTool("drag",
-		mcp.WithDescription("Drag an element from one location to another."),
-		mcp.WithString("source", mcp.Required(), mcp.Description("Source element selector.")),
-		mcp.WithString("target", mcp.Required(), mcp.Description("Target element selector.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleDrag(mgr))
-
-	// upload_file
-	s.AddTool(mcp.NewTool("upload_file",
-		mcp.WithDescription("Upload files through a file input element."),
-		mcp.WithString("selector", mcp.Required(), mcp.Description("File input element selector.")),
-		mcp.WithString("files", mcp.Required(), mcp.Description("Comma-separated file paths to upload.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-	), handleUpload(mgr))
-
-	// close
-	s.AddTool(mcp.NewTool("close_browser",
-		mcp.WithDescription("Close the browser session (optionally close all sessions)."),
-		mcp.WithString("session", mcp.Description("Session name to close. Uses default session if omitted.")),
-		mcp.WithBoolean("all", mcp.Description("Close ALL active browser sessions.")),
-	), handleClose(mgr))
-
-	// eval_script
-	s.AddTool(mcp.NewTool("eval_script",
-		mcp.WithDescription("Execute JavaScript in the browser context. Use for data extraction or custom interactions."),
-		mcp.WithString("script", mcp.Required(), mcp.Description("JavaScript code to execute. Use base64 mode (-b) for binary data.")),
-		mcp.WithString("session", mcp.Description("Session name.")),
-		mcp.WithBoolean("base64", mcp.Description("Encode the script as base64 (for scripts with special characters).")),
-	), handleEval(mgr))
+	r.add(core, mcp.NewTool("close_browser",
+		mcp.WithDescription("Close the browser for a session, or every session with all:true."),
+		mcp.WithBoolean("all", mcp.Description("Close every session.")),
+		sessionParam(), destructive(),
+	), r.handleClose)
 }
 
-func handleNavigatePage(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		navType := request.GetString("type", "url")
-		url := request.GetString("url", "")
+var (
+	navigateActions = []string{"goto", "back", "forward", "reload", "pushstate"}
+	elementActions  = []string{"hover", "focus", "check", "uncheck", "scroll_into_view", "highlight"}
+	keyCommands     = map[string]string{"press": "press", "down": "keydown", "up": "keyup"}
+)
 
-		switch navType {
-		case "back":
-			return runCmd(ctx, mgr, session, "back")
-		case "forward":
-			return runCmd(ctx, mgr, session, "forward")
-		case "reload":
-			args := []string{"reload"}
-			if request.GetBool("ignoreCache", false) {
-				args = append(args, "--ignore-cache")
-			}
-			return runCmd(ctx, mgr, session, args...)
-		default:
-			if url == "" {
-				return mcp.NewToolResultError("url is required when type is 'url'"), nil
-			}
-			args := []string{"open", url}
-			timeout := request.GetFloat("timeout", 0)
-			if timeout > 0 {
-				args = append(args, fmt.Sprintf("--timeout=%d", int(timeout)))
-			}
-			return runCmd(ctx, mgr, session, args...)
+func navigateArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req)
+	switch action := b.enum("action", "goto", navigateActions...); action {
+	case "back", "forward", "reload":
+		b.add(action)
+	case "pushstate":
+		b.add("pushstate", b.requiredFor("url", action))
+	default:
+		b.add("open", b.requiredFor("url", action)).flag("--headers", "headers")
+	}
+	return b.done()
+}
+
+func clickArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req)
+	sel := b.required("selector")
+	if b.boolean("double") {
+		return b.add("dblclick", sel).boolFlag("--human", "human").done()
+	}
+	return b.add("click", sel).boolFlag("--new-tab", "newTab").boolFlag("--human", "human").done()
+}
+
+// visibleOnly makes an action refuse a target that is not visible:
+// agent-browser reports success for clicks, double-clicks, fills, typing and
+// hovers on display:none elements even though nothing receives them, e.g. a
+// desktop-only button after the page switched to its mobile layout. target
+// returns the selector to check and what the action does to it, or "" when
+// the call needs no visible target. Invalid input is reported before the check.
+func (r *Registry) visibleOnly(target func(mcp.CallToolRequest) (sel, doing string), fn argvFunc) server.ToolHandlerFunc {
+	next := r.action(fn)
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if _, err := fn(req); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if sel, doing := target(req); sel != "" && r.hidden(ctx, req, sel) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"%s is not visible (display:none, visibility:hidden or zero size), so %s would do nothing; the layout may have changed, so take a fresh snapshot and use a visible element", sel, doing)), nil
+		}
+		return next(ctx, req)
+	}
+}
+
+// Targets that must be visible. A link opened in a new tab is not clicked,
+// and check, select and focus work on hidden elements, so they are not guarded.
+func clickTarget(req mcp.CallToolRequest) (string, string) {
+	if req.GetBool("newTab", false) {
+		return "", ""
+	}
+	return req.GetString("selector", ""), "clicking it"
+}
+
+func fillTarget(req mcp.CallToolRequest) (string, string) {
+	return req.GetString("selector", ""), "filling it"
+}
+
+func typeTarget(req mcp.CallToolRequest) (string, string) {
+	if mode := req.GetString("mode", ""); mode != "" && mode != "element" {
+		return "", ""
+	}
+	return req.GetString("selector", ""), "typing into it"
+}
+
+func hoverTarget(req mcp.CallToolRequest) (string, string) {
+	if req.GetString("action", "") != "hover" {
+		return "", ""
+	}
+	return req.GetString("selector", ""), "hovering over it"
+}
+
+// hidden reports whether selector matches an element that is not visible. It
+// is false when the check cannot tell (the element is missing, the CLI fails,
+// or the page is paused in the debugger and would block the check), leaving
+// the action to report its own errors.
+func (r *Registry) hidden(ctx context.Context, req mcp.CallToolRequest, selector string) bool {
+	if page := r.dt.Existing(getSession(req)); page != nil && page.Paused() != nil {
+		return false
+	}
+	out, err := r.mgr.Run(ctx, getSession(req), "is", "visible", selector)
+	if err != nil {
+		return false
+	}
+	var v struct {
+		Visible *bool `json:"visible"`
+	}
+	return json.Unmarshal(out.Data, &v) == nil && v.Visible != nil && !*v.Visible
+}
+
+func fillArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "fill")
+	return b.add(b.required("selector"), b.provided("value")).done()
+}
+
+func typeArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req)
+	text := b.required("text")
+	defaultMode := "keystrokes"
+	if b.str("selector") != "" {
+		defaultMode = "element"
+	}
+	switch b.enum("mode", defaultMode, "element", "keystrokes", "insert") {
+	case "keystrokes":
+		b.add("keyboard", "type", text)
+	case "insert":
+		b.add("keyboard", "inserttext", text)
+	default:
+		b.add("type", b.requiredFor("selector", "mode element"), text)
+	}
+	return b.done()
+}
+
+func pressKeyArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req)
+	key := b.required("key")
+	return b.add(keyCommands[b.enum("action", "press", "press", "down", "up")], key).done()
+}
+
+func elementActionArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req)
+	sel := b.required("selector")
+	action := b.enum("action", "", elementActions...)
+	if action == "scroll_into_view" {
+		action = "scrollintoview"
+	}
+	return b.add(action, sel).done()
+}
+
+func selectArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "select")
+	return b.add(b.required("selector")).add(b.list("values")...).done()
+}
+
+func scrollArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "scroll")
+	b.add(b.enum("direction", "down", "up", "down", "left", "right"))
+	if req.GetFloat("px", 0) > 0 {
+		b.add(b.int("px"))
+	}
+	return b.flag("--selector", "selector").done()
+}
+
+func dragArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "drag")
+	return b.add(b.required("source"), b.required("target")).boolFlag("--human", "human").done()
+}
+
+// uploadArgv passes each file as its own argument; the CLI does not split commas.
+func uploadArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "upload")
+	return b.add(b.required("selector")).add(b.list("files")...).done()
+}
+
+func downloadArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "download")
+	return b.add(b.required("selector"), b.required("path")).done()
+}
+
+func evalArgv(req mcp.CallToolRequest) ([]string, error) {
+	b := newArgv(req, "eval")
+	return b.add(b.required("script")).done()
+}
+
+func (r *Registry) handleClose(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if !req.GetBool("all", false) {
+		r.dt.Forget(getSession(req))
+		res := r.run(ctx, req, "close")
+		if !res.IsError {
+			r.mgr.RemoveSession(r.mgr.ResolveSession(getSession(req)))
+		}
+		return res, nil
+	}
+	r.dt.Close()
+	res := r.run(ctx, req, "close", "--all")
+	if !res.IsError {
+		for _, s := range r.mgr.Sessions() {
+			r.mgr.RemoveSession(s.Name)
 		}
 	}
-}
-
-func handleClick(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		args := []string{"click", selector}
-		if request.GetBool("newTab", false) {
-			args = append(args, "--new-tab")
-		}
-		return runCmd(ctx, mgr, session, args...)
-	}
-}
-
-func handleDblClick(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, session, "dblclick", selector)
-	}
-}
-
-func handleFill(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		value, _ := request.RequireString("value")
-		return runCmd(ctx, mgr, session, "fill", selector, value)
-	}
-}
-
-func handleType(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		text, _ := request.RequireString("text")
-		return runCmd(ctx, mgr, session, "type", selector, text)
-	}
-}
-
-func handlePressKey(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		key, _ := request.RequireString("key")
-		return runCmd(ctx, mgr, session, "press", key)
-	}
-}
-
-func handleHover(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, session, "hover", selector)
-	}
-}
-
-func handleFocus(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, session, "focus", selector)
-	}
-}
-
-func handleCheck(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, session, "check", selector)
-	}
-}
-
-func handleUncheck(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, session, "uncheck", selector)
-	}
-}
-
-func handleSelect(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		value, _ := request.RequireString("value")
-		return runCmd(ctx, mgr, session, "select", selector, value)
-	}
-}
-
-func handleScroll(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		direction, _ := request.RequireString("direction")
-		args := []string{"scroll", direction}
-		px := request.GetFloat("px", 0)
-		if px > 0 {
-			args = append(args, fmt.Sprintf("%d", int(px)))
-		}
-		if sel := request.GetString("selector", ""); sel != "" {
-			args = append(args, "--selector", sel)
-		}
-		return runCmd(ctx, mgr, session, args...)
-	}
-}
-
-func handleScrollIntoView(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		return runCmd(ctx, mgr, session, "scrollintoview", selector)
-	}
-}
-
-func handleDrag(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		source, _ := request.RequireString("source")
-		target, _ := request.RequireString("target")
-		return runCmd(ctx, mgr, session, "drag", source, target)
-	}
-}
-
-func handleUpload(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		selector, _ := request.RequireString("selector")
-		files, _ := request.RequireString("files")
-		return runCmd(ctx, mgr, session, "upload", selector, files)
-	}
-}
-
-func handleClose(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		if request.GetBool("all", false) {
-			mgr.CloseAll(ctx)
-			return mcp.NewToolResultText("All browser sessions closed."), nil
-		}
-		return runCmd(ctx, mgr, session, "close")
-	}
-}
-
-func handleEval(mgr *browser.Manager) server.ToolHandlerFunc {
-	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		session := getSession(request)
-		script, _ := request.RequireString("script")
-		args := []string{"eval"}
-		if request.GetBool("base64", false) {
-			args = append(args, "-b")
-		}
-		args = append(args, script)
-		return runCmd(ctx, mgr, session, args...)
-	}
+	return res, nil
 }
