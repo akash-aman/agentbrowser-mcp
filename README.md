@@ -64,23 +64,27 @@ Made with ❤️ by [Akash Aman](https://linktr.ee/akash_aman)
 
 ## 🆚 How it differs from Claude in Chrome
 
-Both let Claude use a browser, but they do different jobs, and they work well side by side.
+Both let Claude use a browser, and they work well side by side. Claude in Chrome works in your own browser and can read the console, network requests and the page. agent-browser-mcp adds the rest of DevTools: the debugger, profilers, the Elements panel, emulation and network control.
 
-| | Claude in Chrome | agent-browser-mcp |
+| | [Claude in Chrome](https://claude.com/chrome) | agent-browser-mcp |
 |---|---|---|
-| **Built for** | Doing tasks in your everyday Chrome: browsing, forms, reading pages | Building and fixing websites: debugging, profiling and testing them |
-| **Browser** | Your own Chrome, with your tabs and logins, through an extension | A separate browser the agent controls: visible or headless, one per session, or your profile if you choose |
-| **Sees the page through** | Screenshots, page reading, console and network logs | The accessibility tree with `@ref`s, plus the DevTools panels as text |
+| **Built for** | Working alongside you in your browser: reading pages, clicking, filling forms; from Claude Code, testing web apps and reading console errors | Building and fixing websites: debugging, profiling and testing them |
+| **Browser** | Your own Chrome, with the tabs and sign-ins you already have, through an extension | A separate browser the agent drives: visible or headless, one window per session, or a saved profile or running Chrome if you choose |
+| **Reads the page** | Screenshots, an accessibility tree with element refs, page text, console and network requests | The same, with `@ref`s, plus the DevTools panels as text |
+| **Runs JavaScript in the page** | ✓ | ✓ |
 | **JavaScript debugger** (breakpoints, stepping, scope, source maps) | — | ✓ |
 | **Performance** (traces, CPU profiles, filmstrip, Web Vitals, Lighthouse, coverage) | — | ✓ |
 | **Memory** (heap snapshots, diffs, retainers) | — | ✓ |
 | **Elements** (CSS cascade, computed, box model, contrast, forced states) | — | ✓ |
-| **Emulation** (devices, network and CPU throttling, media features, locale) | — | ✓ |
-| **Network control** (mock, block, HAR, replay, initiators, cookie reasons) | Reads requests | ✓ |
-| **Exports a test** | GIF of the session | Playwright or Puppeteer script |
-| **Works with** | Claude apps with the extension | Any MCP client: Claude Code, Claude Desktop, Cursor, Cline… |
+| **Emulation** (devices, network and CPU throttling, media features, locale) | Window resize | ✓ |
+| **Network** | Reads requests | Reads requests, plus mock, block, HAR, replay, initiators and cookie reasons |
+| **Records the session** | As a GIF; you can also record a workflow for Claude to repeat | As a video, or as a Playwright or Puppeteer script |
+| **Works with** | Claude Code (CLI and VS Code), Claude Desktop, and its own side panel in Chrome | Any MCP client: Claude Code, Claude Desktop, Cursor, Cline… |
+| **Account** | A paid Claude plan, signed in to the extension; Claude Code keeps it off with an API key or through Bedrock, Google Cloud or Foundry | None: it runs on your machine, with whatever model your client uses |
 
-Use Claude in Chrome when you want Claude to act in your own browser. Use agent-browser-mcp when the website itself is the work.
+"—" means Claude in Chrome has no tool for it in its tool list (October 2026); its JavaScript tool can script parts of these by hand. Sources: [Use Claude Code with Chrome](https://code.claude.com/docs/en/chrome), [Get started with Claude in Chrome](https://support.claude.com/en/articles/12012173-get-started-with-claude-in-chrome), [Claude in Chrome in Claude Desktop](https://claude.com/docs/third-party/claude-desktop/browser), and the extension's tools (`/mcp` → claude-in-chrome → View tools).
+
+Use Claude in Chrome for tasks in your own browser and quick checks of a page. Use agent-browser-mcp when the website itself is the work and you need DevTools to fix it.
 
 ## ⚡ Why it's efficient
 
