@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +28,10 @@ type Session struct {
 type Manager struct {
 	cfg      *config.Config
 	sessions map[string]*Session
-	mu       sync.RWMutex
+	// restarted holds the sessions whose browser had closed since this
+	// server last used them, until Restarted reports it.
+	restarted map[string]bool
+	mu        sync.RWMutex
 
 	versionOnce sync.Once
 	version     CLIVersion
@@ -36,8 +40,9 @@ type Manager struct {
 // NewManager creates a browser manager.
 func NewManager(cfg *config.Config) *Manager {
 	return &Manager{
-		cfg:      cfg,
-		sessions: make(map[string]*Session),
+		cfg:       cfg,
+		sessions:  make(map[string]*Session),
+		restarted: make(map[string]bool),
 	}
 }
 
@@ -57,15 +62,29 @@ func (m *Manager) Sessions() []*Session {
 	return out
 }
 
-// TrackSession records an active session.
-func (m *Manager) TrackSession(name string) {
+// TrackSession records an active session and reports whether this server
+// had used it before.
+func (m *Manager) TrackSession(name string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if s, ok := m.sessions[name]; ok {
 		s.LastActive = time.Now()
-		return
+		return true
 	}
 	m.sessions[name] = &Session{Name: name, LastActive: time.Now()}
+	return false
+}
+
+// Restarted reports, once, that a command had to launch a new browser for a
+// session this server was already using: the old one had closed, after the
+// idle timeout or by hand, taking its tabs and page state with it.
+func (m *Manager) Restarted(session string) bool {
+	name := m.ResolveSession(session)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := m.restarted[name]
+	delete(m.restarted, name)
+	return r
 }
 
 // RemoveSession removes a session from tracking.
@@ -150,6 +169,11 @@ func (m *Manager) GlobalArgs(session string) []string {
 	f.value("--download-path", c.DownloadPath)
 	f.value("--user-agent", c.UserAgent)
 	f.value("--input-mode", c.InputMode)
+	// Without an explicit timeout agent-browser never closes a headed
+	// browser. One the user attached is theirs to close.
+	if c.IdleTimeout > 0 && !c.AutoConnect && c.CDP == "" {
+		f.value("--idle-timeout", strconv.FormatInt(c.IdleTimeout.Milliseconds(), 10))
+	}
 	// JSON output is what the tools parse.
 	return append(f, "--json")
 }
@@ -186,7 +210,7 @@ func (m *Manager) Run(ctx context.Context, session string, args ...string) (*Res
 // subcommand, never its arguments, so filled-in values do not leak into logs.
 func (m *Manager) RunTimeout(ctx context.Context, session string, timeout time.Duration, args ...string) (*Result, error) {
 	session = m.ResolveSession(session)
-	m.TrackSession(session)
+	used := m.TrackSession(session)
 	name := commandName(args)
 
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -201,7 +225,24 @@ func (m *Manager) RunTimeout(ctx context.Context, session string, timeout time.D
 	case err != nil && !out.started:
 		return nil, fmt.Errorf("cannot run %s: %w", m.cfg.AgentBrowserPath, err)
 	}
-	return checkResult(name, parseResult(out.stdout, out.stderr, err == nil), err)
+	res := parseResult(out.stdout, out.stderr, err == nil)
+	if used && launchedBrowser(res.Data) {
+		m.mu.Lock()
+		m.restarted[session] = true
+		m.mu.Unlock()
+	}
+	return checkResult(name, res, err)
+}
+
+// launchedBrowser reports whether the command started a new browser, as
+// agent-browser says in the lifecycle it adds to object results.
+func launchedBrowser(data json.RawMessage) bool {
+	var d struct {
+		Lifecycle struct {
+			Launched bool `json:"launched"`
+		} `json:"lifecycle"`
+	}
+	return json.Unmarshal(data, &d) == nil && d.Lifecycle.Launched
 }
 
 func commandName(args []string) string {

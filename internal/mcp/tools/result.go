@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -48,6 +49,27 @@ func formatData(data json.RawMessage) string {
 		}
 	}
 	return note + formatObject(obj)
+}
+
+// restartNote explains a browser that closed between two calls.
+func restartNote(idle time.Duration) string {
+	why := "e.g. idle or closed by hand"
+	if idle > 0 {
+		why = "browsers close after " + shortDuration(idle) + " without commands"
+	}
+	return "Note: this session's browser had closed since its last use (" + why + "), so this call started a fresh one; earlier tabs, page state and @refs are gone."
+}
+
+// shortDuration drops the zero units time.Duration prints: 15m, not 15m0s.
+func shortDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 // relaunchNote warns when the CLI had to relaunch the browser for this

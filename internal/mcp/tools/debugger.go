@@ -14,7 +14,7 @@ import (
 
 func (r *Registry) registerDebugger() {
 	r.add(config.ToolsetDevtools, mcp.NewTool("debugger",
-		mcp.WithDescription("JavaScript debugger: search sources, set line/conditional breakpoints, logpoints, DOM/XHR/event breakpoints or pause on exceptions, trigger them with any tool, then inspect stack, scope, watch expressions and source, evaluate in a frame, and step/resume. Actions that hit a breakpoint return right away with the paused location."),
+		mcp.WithDescription("JavaScript debugger: search sources, set line/conditional breakpoints, logpoints, DOM/XHR/event breakpoints or pause on exceptions, trigger them with any tool, then inspect stack, scope, watch expressions and source, evaluate in a frame, and step/resume. Use it to find why a feature misbehaves, a value is wrong or an exception is thrown, from runtime values rather than guesses from the source. Actions that hit a breakpoint return right away with the paused location."),
 		mcp.WithString("action", mcp.Required(), mcp.Enum(debuggerActions...)),
 		mcp.WithString("url", mcp.Description("breakpoint/continue_to: script URL.")),
 		mcp.WithString("urlRegex", mcp.Description("breakpoint: script URL regex instead of url.")),

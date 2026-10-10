@@ -17,7 +17,7 @@ func TestBatchRunsStepsInOrder(t *testing.T) {
 	if res.IsError {
 		t.Fatal(res.text())
 	}
-	want := cmds(cmd("open", "http://x/"), visible("#q"), cmd("fill", "#q", "hi"), cmd("press", "Enter"))
+	want := append(loads(cmd("open", "http://x/")), visible("#q"), cmd("fill", "#q", "hi"), cmd("press", "Enter"))
 	if got := e.fake.Commands(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q, want %q", got, want)
 	}

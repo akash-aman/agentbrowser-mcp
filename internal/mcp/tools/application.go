@@ -11,7 +11,7 @@ import (
 
 func (r *Registry) registerApplication() {
 	r.add(config.ToolsetStorage, mcp.NewTool("application",
-		mcp.WithDescription("DevTools Application panel for the page's origin: IndexedDB databases and records, Cache Storage, service workers, web app manifest, storage usage/quota, or clear all site data."),
+		mcp.WithDescription("DevTools Application panel for the page's origin: IndexedDB databases and records, Cache Storage, service workers, web app manifest, storage usage/quota, or clear all site data. Use it for stale content, caching, offline and PWA problems."),
 		mcp.WithString("action", mcp.Required(), mcp.Enum(applicationActions...)),
 		mcp.WithString("database", mcp.Description("indexeddb_read: database name.")),
 		mcp.WithString("store", mcp.Description("indexeddb_read: object store name.")),

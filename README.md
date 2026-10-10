@@ -99,6 +99,7 @@ Every setting can come from an environment variable or a flag; flags win.
 | `AGENT_BROWSER_ACTION_POLICY` | `--action-policy` | — | Action policy JSON file |
 | `AGENT_BROWSER_CONTENT_BOUNDARIES` | `--content-boundaries` | `false` | Mark page output to resist prompt injection |
 | `AGENT_BROWSER_CONFIG` | `--config` | — | agent-browser.json config file |
+| `AGENT_BROWSER_MCP_IDLE_TIMEOUT` | `--idle-timeout` | `15m` | Close a session's browser after this long without commands (`10m`, `1h`, …). agent-browser alone never closes a headed browser, and an open window keeps rendering its page, so forgotten windows keep the CPU busy. The next call starts a fresh browser and tells the model its old page and `@ref`s are gone. Not applied to a browser you attached with `--auto-connect` or `--cdp`. `0` leaves it to agent-browser |
 | `AGENT_BROWSER_MCP_CLOSE_ON_EXIT` | `--close-on-exit` | `false` | Close the browser sessions this server used when it stops. Off by default: sessions are agent-browser daemons, so an MCP reconnect or update keeps your browser, page and logins |
 | `AGENT_BROWSER_MCP_LIGHTHOUSE_PATH` | `--lighthouse-path` | `lighthouse` | Lighthouse CLI for `performance` action `lighthouse` (`npm install -g lighthouse`) |
 
@@ -110,7 +111,7 @@ Every tool takes an optional `session` for an isolated browser.
 
 | Tool | What it does |
 |---|---|
-| `navigate` | goto (with optional per-origin `headers`), back, forward, reload, SPA pushstate |
+| `navigate` | goto (with optional per-origin `headers`), back, forward, reload, SPA pushstate; reports uncaught JS errors and failed requests from the load |
 | `snapshot` | Accessibility tree with `@ref`s — the primary way to read a page. `delta:true` returns only the refs added, changed or removed since the last delta snapshot (`full:true` resets the baseline) |
 | `page_text` | Readable text of the page or an element |
 | `get` | text, html, value, attr, count, box, styles, visible/enabled/checked, title, url, cdp_url |
@@ -138,22 +139,28 @@ Every tool takes an optional `session` for an isolated browser.
 
 `debugger`, `performance` (metrics, heap, coverage, Lighthouse), `application`, `console` issues and throttling talk to Chrome directly over the DevTools Protocol, using the CDP endpoint of the agent-browser session. The server keeps one connection per session on its active tab. Breakpoints, coverage recording and throttling live on that connection, so they last across tool calls until the browser closes. When the MCP server restarts (a reconnect or an update), the browser keeps running, but this per-connection state is released: throttling and breakpoints are dropped, and a paused page resumes unless a DevTools window also holds the pause. The server finds the active tab by its tab ID, which agent-browser can report even while the page is paused, so after a restart the `debugger` tool reattaches to a page that is still paused. While the debugger is on, it stays on the tab where you turned it on. If that tab is closed, the next call moves to the session's current tab and says the breakpoints are gone. While the page is paused, the other DevTools tools refuse with "resume first" rather than hanging, and every CDP call is bounded by `--timeout`.
 
-### Choose the cheapest tool
+### What the model is told
 
-The server sends this table to the model as instructions:
+The server's instructions are written so the model investigates on its own, from the symptom the user describes, without being told which tool to use:
 
-| Goal | Prefer | Avoid / only when |
-|---|---|---|
-| See page structure | `snapshot` (interactive, scoped) | `screenshot` — only for visual checks |
-| Read content | `page_text` | full `snapshot`, `get html` |
-| Act on an element | `click`/`fill` with `@ref` | `mouse` x,y — canvas or no-ref targets |
-| Vision: locate what you see | `screenshot annotate:true`, then act by `@ref` | estimating coordinates |
-| Several known steps | one `batch` call | one call per step |
-| See what an action changed | `snapshot:"delta"` on the action, or `snapshot delta:true` | a fresh full snapshot |
-| Wait for the page | `wait` for element/text/url/load | fixed sleeps |
-| Debug API or JS | `network`/`console` with filter, pattern, limit | unfiltered dumps |
-| Step through JavaScript | `debugger` breakpoint, trigger it, then `stack`/`scope`/`evaluate` | logging with `eval_script` |
-| Find performance problems | `performance` vitals or metrics first; `lighthouse` for a full audit | trace/profiler files unless you need a deep dive |
+| Symptom or task | Start with |
+|---|---|
+| Slow page, "optimize", Web Vitals, SEO, a11y | `performance` vitals, then lighthouse; trace or profiler for causes |
+| Jank, stutter, slow scroll or animation | `debug_ui` rendering fpsMeter/paintFlashing, `performance` trace |
+| Layout jumps | `performance` vitals (CLS), `debug_ui` rendering layoutShifts |
+| Bug, broken feature, wrong value | `console` kind:"errors", `network` status:"400-599", `debugger` breakpoint + scope |
+| Memory grows | `performance` heap_snapshot before and after |
+| Big bundle, unused JS/CSS | `performance` coverage_start, use the page, coverage_stop |
+| Caching, service worker, storage | `application` |
+| Mobile/responsive layout | `emulate` device, then `screenshot` |
+
+Rows whose tools are not in the enabled `--toolsets` are left out. `navigate` also checks the page 0.3 s after it loads, so errors thrown right after load are counted. If the load threw uncaught JS errors or got HTTP 4xx/5xx responses, it adds a short note to its result. The note lists the first three of each and says nothing on a clean page, so the model notices broken pages without being asked to look.
+
+The instructions also steer toward the cheapest tool: `snapshot` over `screenshot` except for visual checks, `page_text` to read, `@ref` over `mouse` x,y, one `batch` call for known steps, `wait` for a condition rather than a fixed time, `pattern`/`limit` on `console` and `network`, and `debugger` scope over logging with `eval_script`.
+
+They also keep the model in one browser. Every tool's `session` parameter warns that a new name opens another browser window, so the model only creates a session for a separate login and closes it with `close_browser` when done. A cold-cache measurement doesn't need one either, because `lighthouse` clears the cache itself. Any browser the model forgets closes after `AGENT_BROWSER_MCP_IDLE_TIMEOUT` (15 minutes) without commands.
+
+Claude Code keeps only the first 2,048 characters of a server's instructions. The built-in text uses about 1,650, so keep `AGENT_BROWSER_MCP_PURPOSE` and the project name short. Claude Code also loads MCP tools on demand, so these instructions are what tells the model to reach for the DevTools tools.
 
 ## Upgrading from 1.x
 

@@ -370,11 +370,28 @@ func respond(dir string, cmd []string, name, sub string) string {
 		if slices.Contains(cmd, "--clear") {
 			return `{"cleared":true}`
 		}
+		if strings.Contains(url, "broken") {
+			// A page whose script throws on load, reported like Chrome does:
+			// no url, the location in the stack.
+			return `{"errors":[{"text":"Error: boom","url":"http://fake/app.js","line":3,"column":7},` +
+				`{"text":"TypeError: cart is undefined\n    at http://fake/broken.js:12:5","url":null,"line":0,"column":0}]}`
+		}
 		return `{"errors":[{"text":"Error: boom","url":"http://fake/app.js","line":3,"column":7}]}`
 	case "network":
 		if sub == "requests" {
 			if slices.Contains(cmd, "--clear") {
 				return `{"cleared":true}`
+			}
+			if strings.Contains(url, "broken") {
+				// Ignores --status like a filter that matched everything, and
+				// stamps the load's requests with the current time.
+				now := time.Now().UnixMilli()
+				return fmt.Sprintf(`{"requests":[`+
+					`{"requestId":"0.9","method":"GET","status":500,"resourceType":"Fetch","url":"http://fake/old","timestamp":1}`+
+					`,{"requestId":"2.1","method":"GET","status":200,"resourceType":"Document","url":%[2]s,"timestamp":%[1]d}`+
+					`,{"requestId":"2.2","method":"GET","status":404,"resourceType":"Image","url":"http://fake/missing.png","timestamp":%[1]d}`+
+					`,{"requestId":"2.3","method":"GET","status":500,"resourceType":"Fetch","url":"http://fake/api/cart","timestamp":%[1]d}`+
+					`,{"requestId":"2.4","method":"GET","status":404,"resourceType":"Other","url":"http://fake/favicon.ico","timestamp":%[1]d}]}`, now, q(url))
 			}
 			return `{"requests":[{"requestId":"1.1","method":"GET","status":200,"resourceType":"Document","url":"http://fake/","headers":{"A":"b"}},{"requestId":"1.2","method":"POST","status":null,"resourceType":"Fetch","url":"http://fake/api","headers":{"A":"b"}}]}`
 		}

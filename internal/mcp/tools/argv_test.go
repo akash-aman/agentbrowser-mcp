@@ -28,15 +28,21 @@ func cmd(c ...string) []string      { return c }
 // visible is the check click runs before clicking a target.
 func visible(sel string) []string { return cmd("is", "visible", sel) }
 
+// loads is what navigate runs: the page errors so far, the load, then the
+// errors and failed requests since, for the page health note.
+func loads(c []string) [][]string {
+	return cmds(cmd("errors"), c, cmd("errors"), cmd("network", "requests", "--status", "400-599"))
+}
+
 var argvCases = []argvCase{
 	// navigate
-	{tool: "navigate", args: a{"url": "http://x/"}, want: cmds(cmd("open", "http://x/"))},
-	{tool: "navigate", args: a{"action": "goto", "url": "http://x/"}, want: cmds(cmd("open", "http://x/"))},
-	{tool: "navigate", args: a{"action": "back"}, want: cmds(cmd("back"))},
-	{tool: "navigate", args: a{"action": "forward"}, want: cmds(cmd("forward"))},
-	{tool: "navigate", args: a{"action": "reload"}, want: cmds(cmd("reload"))},
-	{tool: "navigate", args: a{"action": "pushstate", "url": "/next"}, want: cmds(cmd("pushstate", "/next"))},
-	{tool: "navigate", args: a{"url": "http://x/", "headers": `{"Authorization":"Bearer t"}`}, want: cmds(cmd("open", "http://x/", "--headers", `{"Authorization":"Bearer t"}`))},
+	{tool: "navigate", args: a{"url": "http://x/"}, want: loads(cmd("open", "http://x/"))},
+	{tool: "navigate", args: a{"action": "goto", "url": "http://x/"}, want: loads(cmd("open", "http://x/"))},
+	{tool: "navigate", args: a{"action": "back"}, want: loads(cmd("back"))},
+	{tool: "navigate", args: a{"action": "forward"}, want: loads(cmd("forward"))},
+	{tool: "navigate", args: a{"action": "reload"}, want: loads(cmd("reload"))},
+	{tool: "navigate", args: a{"action": "pushstate", "url": "/next"}, want: loads(cmd("pushstate", "/next"))},
+	{tool: "navigate", args: a{"url": "http://x/", "headers": `{"Authorization":"Bearer t"}`}, want: loads(cmd("open", "http://x/", "--headers", `{"Authorization":"Bearer t"}`))},
 	{tool: "navigate", args: a{"action": "goto"}, wantErr: "url is required for goto"},
 	{tool: "navigate", args: a{"action": "pushstate"}, wantErr: "url is required for pushstate"},
 	{tool: "navigate", args: a{"action": "sideways"}, wantErr: "action must be one of"},

@@ -4,6 +4,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -38,27 +39,40 @@ func shutdown(ctx context.Context, cfg *config.Config, mgr *browser.Manager, reg
 	}
 }
 
-// EfficiencyRules is the "choose the cheapest tool" table sent to the model.
-// Each row is goal | prefer | avoid.
-var EfficiencyRules = [][3]string{
-	{"See page structure", "snapshot (interactive:true, selector to scope)", "screenshot — only for visual/layout checks"},
-	{"Read content", "page_text (with selector)", "full snapshot, get html"},
-	{"Act on an element", "click/fill/... with @ref", "mouse x,y — only canvas, maps, or targets with no @ref"},
-	{"Vision: locate what you see", "screenshot annotate:true, then act by @ref", "estimating coordinates from pixels"},
-	{"Several known steps", "one batch call", "one call per step"},
-	{"See what an action changed", `snapshot:"delta" on the action, or snapshot delta:true`, "a fresh full snapshot"},
-	{"Find by visible text or label", "find", "eval_script with querySelector"},
-	{"Wait for the page", "wait for element/text/url/load", "wait for=time fixed sleeps"},
-	{"Debug API or JS", "network / console with filter, pattern, limit", "unfiltered dumps"},
-	{"Step through JavaScript", "debugger breakpoint, trigger it with click/eval_script, then stack/scope/evaluate", "logging with eval_script"},
-	{"Find performance problems", "performance vitals or metrics first; lighthouse for a full audit", "trace/profiler files unless you need a deep dive"},
+// TriageRule maps what a developer reports or asks for to the tools that
+// investigate it, so the model reaches for them without being told to.
+type TriageRule struct {
+	Symptom, Start string
+	Toolsets       []string // shown only when all of these are enabled
+}
+
+// TriageRules is the "investigate on your own" table sent to the model.
+var TriageRules = []TriageRule{
+	{`Slow page, "optimize", Web Vitals, SEO, a11y`, "performance vitals, then lighthouse; trace or profiler for causes", []string{config.ToolsetDevtools}},
+	{"Jank, stutter, slow scroll or animation", "debug_ui rendering fpsMeter/paintFlashing, performance trace", []string{config.ToolsetDevtools}},
+	{"Layout jumps", "performance vitals (CLS), debug_ui rendering layoutShifts", []string{config.ToolsetDevtools}},
+	{"Bug, broken feature, wrong value", `console kind:"errors", network status:"400-599", debugger breakpoint + scope`, []string{config.ToolsetNetwork, config.ToolsetDevtools}},
+	{"Memory grows", "performance heap_snapshot before and after", []string{config.ToolsetDevtools}},
+	{"Big bundle, unused JS/CSS", "performance coverage_start, use the page, coverage_stop", []string{config.ToolsetDevtools}},
+	{"Caching, service worker, storage", "application", []string{config.ToolsetStorage}},
+	{"Mobile/responsive layout", "emulate device, then screenshot", []string{config.ToolsetEmulation}},
+}
+
+// EfficiencyRules are the "cheapest tool first" lines sent to the model.
+var EfficiencyRules = []string{
+	"snapshot (interactive:true) to see the page; screenshot only for visual checks, annotate:true maps it to @refs",
+	"page_text to read, find by text or label, @ref over mouse x,y (canvas, maps)",
+	"batch known steps; wait for a condition, not a fixed time",
+	"pattern and limit on console and network; debugger scope over logging via eval_script",
 }
 
 // BuildInstructions renders the server instructions for cfg, warning the
 // model when the installed agent-browser CLI is not a supported version.
+// Claude Code cuts instructions at 2,048 characters, so the triage table
+// comes first and everything stays short.
 func BuildInstructions(cfg *config.Config, cli browser.CLIVersion) string {
 	var b strings.Builder
-	b.WriteString("Browser automation via agent-browser: navigation, interaction, screenshots, network, console, sessions.\n")
+	b.WriteString("Chrome DevTools for web developers via agent-browser: debug, profile, test and automate websites.\n")
 	if cfg.Project != "" {
 		fmt.Fprintf(&b, "Project: %s\n", cfg.Project)
 	}
@@ -71,16 +85,25 @@ func BuildInstructions(cfg *config.Config, cli browser.CLIVersion) string {
 	if cli.Warning != "" {
 		fmt.Fprintf(&b, "Warning: %s. Tools may fail until it is fixed; tell the user.\n", cli.Warning)
 	}
-	b.WriteString("\n## Workflow\n")
-	b.WriteString("1. navigate to a URL\n")
-	b.WriteString("2. snapshot to get the accessibility tree with @refs (@e1, @e2)\n")
-	b.WriteString("3. click/fill/type with those @refs; a ref lasts while its element does (until it is replaced or the page navigates), and snapshot:\"delta\" on an action shows what changed\n")
-	b.WriteString("\n## Choose the cheapest tool\n")
-	b.WriteString("| Goal | Prefer | Avoid / only when |\n|---|---|---|\n")
-	for _, r := range EfficiencyRules {
-		fmt.Fprintf(&b, "| %s | %s | %s |\n", r[0], r[1], r[2])
+	b.WriteString("\n## Investigate on your own\n")
+	b.WriteString("Use these unasked when you build, fix or test a site; users name symptoms, not tools.\n")
+	b.WriteString("| Symptom or task | Start with |\n|---|---|\n")
+	for _, r := range TriageRules {
+		if slices.ContainsFunc(r.Toolsets, func(t string) bool { return !cfg.HasToolset(t) }) {
+			continue
+		}
+		fmt.Fprintf(&b, "| %s | %s |\n", r.Symptom, r.Start)
 	}
-	b.WriteString("\nEvery tool takes an optional `session` for an isolated browser. ")
-	fmt.Fprintf(&b, "Enabled toolsets: %s.", strings.Join(cfg.Toolsets, ", "))
+	b.WriteString("navigate reports the load's JS errors and failed requests; follow up. After a code change, reload and recheck.\n")
+	b.WriteString("\n## Workflow\n")
+	b.WriteString("navigate, snapshot for @refs, act by @ref (valid while its element exists); snapshot:\"delta\" on an action shows the change.\n")
+	b.WriteString("Stay in one browser: omit session unless you need a separate login (each name opens a window); close_browser yours.\n")
+	b.WriteString("\n## Cheapest tool first\n")
+	for _, r := range EfficiencyRules {
+		fmt.Fprintf(&b, "- %s\n", r)
+	}
+	if len(cfg.Toolsets) < len(config.AllToolsets) {
+		fmt.Fprintf(&b, "\nOnly these toolsets are enabled: %s.", strings.Join(cfg.Toolsets, ", "))
+	}
 	return b.String()
 }

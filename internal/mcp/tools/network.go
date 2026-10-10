@@ -12,7 +12,7 @@ import (
 
 func (r *Registry) registerNetwork() {
 	r.add(config.ToolsetNetwork, mcp.NewTool("network",
-		mcp.WithDescription("Trace or mock network traffic: requests lists one line per request (id method status type url), detail shows headers and body for one id. Narrow with filter/type/method/status and limit."),
+		mcp.WithDescription("Trace or mock network traffic: requests lists one line per request (id method status type url), detail shows headers and body for one id, route mocks or blocks requests. Use it when data is missing, an API call fails or an image or script 404s (status:\"400-599\"); narrow with filter/type/method/status and limit."),
 		mcp.WithString("action", mcp.Enum(networkActions...), mcp.Description("Default requests.")),
 		mcp.WithString("filter", mcp.Description("requests: URL substring.")),
 		mcp.WithString("type", mcp.Description("requests: resource types, e.g. xhr,fetch,document.")),

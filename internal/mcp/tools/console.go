@@ -14,7 +14,7 @@ import (
 
 func (r *Registry) registerConsole() {
 	r.add(config.ToolsetCore, mcp.NewTool("console",
-		mcp.WithDescription("Console messages (kind=log), uncaught page errors (errors), or DevTools Issues such as CORS, mixed content, cookie and deprecation problems (issues), newest last. Filter with pattern and limit instead of reading everything."),
+		mcp.WithDescription("Console messages (kind=log), uncaught page errors (errors), or DevTools Issues such as CORS, mixed content, cookie and deprecation problems (issues), newest last. Check errors and issues first when something is broken, blank or not loading; filter with pattern and limit instead of reading everything."),
 		mcp.WithString("kind", mcp.Enum("log", "errors", "issues"), mcp.Description("Default log.")),
 		mcp.WithString("pattern", mcp.Description("Case-insensitive regex; only matching messages are returned.")),
 		mcp.WithNumber("limit", mcp.Description("Return at most the last N messages. Default 50.")),

@@ -14,7 +14,7 @@ func (r *Registry) registerDevtools() {
 	dev := config.ToolsetDevtools
 
 	r.add(dev, mcp.NewTool("react",
-		mcp.WithDescription("Inspect a React app: component tree, one fiber's props/hooks/state, render profiling, Suspense boundaries. Needs the server started with --enable react-devtools."),
+		mcp.WithDescription("Inspect a React app: component tree, one fiber's props/hooks/state, render profiling to find slow or needless re-renders, Suspense boundaries. Needs the server started with --enable react-devtools."),
 		mcp.WithString("action", mcp.Required(), mcp.Enum(reactActions...)),
 		mcp.WithString("fiberId", mcp.Description("inspect: id from tree.")),
 		mcp.WithBoolean("onlyDynamic", mcp.Description("suspense: hide static boundaries.")),
@@ -45,7 +45,7 @@ func (r *Registry) registerDevtools() {
 	), r.handleDiff)
 
 	r.add(dev, mcp.NewTool("debug_ui",
-		mcp.WithDescription("Open Chrome's DevTools window for the page in the same browser (e.g. on the sources panel to watch the debugger pause), show Rendering overlays in the page (paint flashing heatmap, layout shifts, layer borders, FPS meter), stream the viewport, or run the observability dashboard."),
+		mcp.WithDescription("Show rendering problems in the page with Rendering overlays (paint flashing heatmap, layout-shift regions, layer borders, FPS meter), open Chrome's DevTools window for the page (e.g. on the sources panel to watch the debugger pause), stream the viewport, or run the observability dashboard. Use rendering for jank, slow scrolling, needless repaints or content that jumps."),
 		mcp.WithString("action", mcp.Required(), mcp.Enum(debugUIActions...)),
 		mcp.WithString("panel", mcp.Enum(devtools.DevToolsPanels...), mcp.Description("open_devtools: panel to show first; resources is Application.")),
 		mcp.WithBoolean("external", mcp.Description("open_devtools: instead return a DevTools URL to open in another browser.")),

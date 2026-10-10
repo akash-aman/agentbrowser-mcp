@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // clearEnv unsets every variable Load reads so tests see only what they set.
@@ -26,7 +27,7 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Name != "agent-browser-mcp" || c.AgentBrowserPath != "agent-browser" || c.DefaultTimeout != 60000 || c.MaxOutput != 40000 {
+	if c.Name != "agent-browser-mcp" || c.AgentBrowserPath != "agent-browser" || c.DefaultTimeout != 60000 || c.MaxOutput != 40000 || c.IdleTimeout != 15*time.Minute {
 		t.Fatalf("got %+v", c)
 	}
 	if !slices.Equal(c.Toolsets, AllToolsets) {
@@ -140,6 +141,23 @@ func TestIntSettings(t *testing.T) {
 	}
 }
 
+func TestIdleTimeout(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("AGENT_BROWSER_MCP_IDLE_TIMEOUT", "1h")
+	c, err := Load(nil)
+	if err != nil || c.IdleTimeout != time.Hour {
+		t.Fatalf("got %v err %v", c.IdleTimeout, err)
+	}
+	c, err = Load([]string{"--idle-timeout", "0"})
+	if err != nil || c.IdleTimeout != 0 {
+		t.Fatalf("flag must override env: got %v err %v", c.IdleTimeout, err)
+	}
+	t.Setenv("AGENT_BROWSER_MCP_IDLE_TIMEOUT", "soon")
+	if c, _ := Load(nil); c.IdleTimeout != 15*time.Minute {
+		t.Fatalf("invalid duration env falls back to default, got %v", c.IdleTimeout)
+	}
+}
+
 func TestTildeExpansion(t *testing.T) {
 	clearEnv(t)
 	home, err := os.UserHomeDir()
@@ -230,6 +248,7 @@ func TestValidate(t *testing.T) {
 	}{
 		"zero timeout":      {[]string{"--timeout", "0"}, "timeout must be positive"},
 		"negative output":   {[]string{"--max-output", "-1"}, "max-output must be >= 0"},
+		"negative idle":     {[]string{"--idle-timeout", "-1m"}, "idle-timeout must be >= 0"},
 		"empty binary path": {[]string{"--agent-browser-path", ""}, "agent-browser path must not be empty"},
 		"cdp and auto":      {[]string{"--cdp", "9222", "--auto-connect"}, "mutually exclusive"},
 		"bad input mode":    {[]string{"--input-mode", "robot"}, `input-mode must be instant, smooth or human, got "robot"`},

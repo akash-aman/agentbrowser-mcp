@@ -51,6 +51,7 @@ func newEnv(t *testing.T, tweak ...func(*config.Config)) *env {
 	mgr := browser.NewManager(cfg)
 	srv := server.NewMCPServer("test", "0", server.WithToolCapabilities(false))
 	reg := RegisterAll(srv, cfg, mgr)
+	reg.healthSettle = 0 // the fake has no late errors to wait for
 	return &env{t: t, srv: srv, fake: fake, cfg: cfg, mgr: mgr, reg: reg}
 }
 

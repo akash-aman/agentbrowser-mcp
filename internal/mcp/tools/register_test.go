@@ -2,6 +2,7 @@ package tools
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/vercel-labs/agent-browser-mcp/internal/config"
@@ -94,8 +95,14 @@ func TestEveryToolTakesSession(t *testing.T) {
 		if st.Tool.Name == "help" {
 			continue
 		}
-		if _, ok := st.Tool.InputSchema.Properties["session"]; !ok {
+		p, ok := st.Tool.InputSchema.Properties["session"].(map[string]any)
+		if !ok {
 			t.Errorf("%s has no session parameter", st.Tool.Name)
+			continue
+		}
+		// Models otherwise open a session per task, each in its own window.
+		if d, _ := p["description"].(string); !strings.Contains(d, "opens another window") {
+			t.Errorf("%s session description %q does not warn that a new session opens a window", st.Tool.Name, d)
 		}
 	}
 }
@@ -103,10 +110,11 @@ func TestEveryToolTakesSession(t *testing.T) {
 // TestSchemaBudget stops tool schemas from creeping back toward the 1.x size
 // (150 tools, 67 KB of compact JSON sent with every request). The budget
 // covers all toolsets including the CDP debugger, profiling and application
-// tools; --toolsets core is about half of it.
+// tools, and descriptions that say when to reach for each DevTools tool;
+// --toolsets core is about half of it.
 func TestSchemaBudget(t *testing.T) {
 	t.Parallel()
-	const budget = 36 << 10
+	const budget = 38 << 10
 	e := newEnv(t)
 	size := len(e.toolsList())
 	t.Logf("tools/list with all toolsets: %d tools, %d bytes", len(e.reg.Tools()), size)

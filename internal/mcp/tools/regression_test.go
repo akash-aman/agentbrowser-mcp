@@ -22,7 +22,8 @@ func TestRegressionBackForwardUseSession(t *testing.T) {
 			e := newEnv(t)
 			e.call("navigate", a{"action": action, "session": "work"})
 			calls := e.fake.Calls()
-			if len(calls) != 1 || !hasFlag(calls[0], "--session", "work") {
+			if !slices.ContainsFunc(calls, func(c []string) bool { return slices.Contains(c, action) }) ||
+				slices.ContainsFunc(calls, func(c []string) bool { return !hasFlag(c, "--session", "work") }) {
 				t.Fatalf("navigate %s must run in session work, got %q", action, calls)
 			}
 		})

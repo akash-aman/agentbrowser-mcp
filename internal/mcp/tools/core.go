@@ -16,12 +16,12 @@ func (r *Registry) registerCore() {
 	core := config.ToolsetCore
 
 	r.add(core, mcp.NewTool("navigate",
-		mcp.WithDescription("Open a URL, or go back/forward/reload, or do SPA client-side navigation (pushstate)."),
+		mcp.WithDescription("Open a URL, or go back/forward/reload, or do SPA client-side navigation (pushstate). The result lists uncaught JS errors and failed requests from the load, if any."),
 		mcp.WithString("url", mcp.Description("Target URL. Required for goto and pushstate.")),
 		mcp.WithString("action", mcp.Enum(navigateActions...), mcp.Description("Default goto.")),
 		mcp.WithString("headers", mcp.Description("goto: JSON object of HTTP headers sent only to this URL's origin, e.g. an Authorization bearer token.")),
 		snapshotParam(), sessionParam(), mutating(),
-	), r.action(navigateArgv))
+	), r.navigation(navigateArgv))
 
 	r.add(core, mcp.NewTool("click",
 		mcp.WithDescription("Click an element. Prefer @ref from snapshot; set snapshot:\"delta\" to see the effect in the same call."),

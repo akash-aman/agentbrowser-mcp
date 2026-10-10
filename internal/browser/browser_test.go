@@ -99,6 +99,28 @@ func TestGlobalArgsEveryField(t *testing.T) {
 	}
 }
 
+// TestGlobalArgsIdleTimeout: agent-browser keeps a headed browser open until
+// it is told a timeout, but must not shut down a browser the user attached.
+func TestGlobalArgsIdleTimeout(t *testing.T) {
+	t.Parallel()
+	idle := []string{"--idle-timeout", "900000", "--json"}
+	cases := []struct {
+		name string
+		cfg  config.Config
+		want []string
+	}{
+		{"set", config.Config{IdleTimeout: 15 * time.Minute, Headed: true}, append([]string{"--headed"}, idle...)},
+		{"zero leaves the CLI default", config.Config{}, []string{"--json"}},
+		{"auto-connect", config.Config{IdleTimeout: time.Minute, AutoConnect: true}, []string{"--auto-connect", "--json"}},
+		{"cdp", config.Config{IdleTimeout: time.Minute, CDP: "9222"}, []string{"--cdp", "9222", "--json"}},
+	}
+	for _, c := range cases {
+		if got := NewManager(&c.cfg).GlobalArgs(""); !slices.Equal(got, c.want) {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestResolveSession(t *testing.T) {
 	t.Parallel()
 	m := NewManager(&config.Config{Session: "cfg"})
@@ -226,6 +248,38 @@ func TestSessionTracking(t *testing.T) {
 	}
 	if len(closes) != 2 {
 		t.Fatalf("want 2 close calls, got %q", fake.Calls())
+	}
+}
+
+// TestRestartedAfterTheBrowserClosed: a browser launch for a session this
+// server already used means its old browser, and the page in it, is gone.
+func TestRestartedAfterTheBrowserClosed(t *testing.T) {
+	t.Parallel()
+	m, fake := newManager(t)
+	ctx := context.Background()
+	launched := `{"url":"about:blank","lifecycle":{"launched":true,"reused":false}}`
+	fake.Respond("get", launched)
+	m.Run(ctx, "a", "get", "url")
+	if m.Restarted("a") {
+		t.Fatal("the first launch of a session is not a restart")
+	}
+	fake.Respond("get", `{"url":"http://x/","lifecycle":{"launched":false,"reused":true}}`)
+	m.Run(ctx, "a", "get", "url")
+	if m.Restarted("a") {
+		t.Fatal("a reused browser is not a restart")
+	}
+	fake.Respond("get", launched)
+	m.Run(ctx, "a", "get", "url")
+	if !m.Restarted("a") {
+		t.Fatal("a new browser for a used session is a restart")
+	}
+	if m.Restarted("a") {
+		t.Fatal("Restarted reports a restart once")
+	}
+	m.RemoveSession("a")
+	m.Run(ctx, "a", "get", "url")
+	if m.Restarted("a") {
+		t.Fatal("a session closed on purpose starts fresh without a note")
 	}
 }
 

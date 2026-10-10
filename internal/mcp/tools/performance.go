@@ -17,7 +17,7 @@ import (
 
 func (r *Registry) registerPerformance() {
 	r.add(config.ToolsetDevtools, mcp.NewTool("performance",
-		mcp.WithDescription("Measure and profile the page: Web Vitals, navigation timing, live runtime metrics, memory and heap snapshots, JS/CSS coverage, Lighthouse audits, traces or CPU profiles (summarized on stop) and a main-thread activity heatmap of the last recording. Start with vitals or metrics; lighthouse is thorough but takes 20-60s, and a trace and a CPU profile cannot record at the same time."),
+		mcp.WithDescription("Find why a page is slow or heavy: Web Vitals (LCP, CLS, INP), navigation timing and slowest resources, runtime metrics, memory and heap snapshots for leaks, JS/CSS coverage for unused code, Lighthouse audits (performance, accessibility, best practices, SEO), and traces or CPU profiles summarized on stop with a main-thread heatmap. Use it unasked when a page loads slowly, janks or grows in memory, and before and after a performance fix to show the change. Start with vitals or metrics; lighthouse takes 20-60s and clears the cache itself, so it needs no fresh session, and a trace and a CPU profile cannot record at the same time."),
 		mcp.WithString("action", mcp.Required(), mcp.Enum(performanceActions...)),
 		mcp.WithString("url", mcp.Description("vitals/lighthouse: URL to load. Default current page.")),
 		mcp.WithString("path", mcp.Description("trace_stop/profiler_stop/heap_snapshot/lighthouse: output file. Default temp dir. heatmap: recording to read; default the last one.")),

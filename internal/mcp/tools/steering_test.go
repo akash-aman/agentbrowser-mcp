@@ -10,8 +10,9 @@ import (
 
 var sentenceEnd = regexp.MustCompile(`[.!?](\s|$)`)
 
-// TestDescriptionsAreShort keeps each description to at most two sentences:
-// what the tool does, then when to prefer it or what to prefer instead.
+// TestDescriptionsAreShort keeps each description to at most three
+// sentences: what the tool does, when to reach for it, and what to prefer or
+// watch out for.
 func TestDescriptionsAreShort(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -22,7 +23,7 @@ func TestDescriptionsAreShort(t *testing.T) {
 			continue
 		}
 		n := len(sentenceEnd.FindAllString(strings.ReplaceAll(d, "e.g.", "eg"), -1))
-		if n > 2 {
+		if n > 3 {
 			t.Errorf("%s description has %d sentences: %q", st.Tool.Name, n, d)
 		}
 	}

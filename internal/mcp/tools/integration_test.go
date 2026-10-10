@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/server"
 
@@ -40,6 +42,10 @@ func TestIntegration(t *testing.T) {
 			fmt.Fprint(w, `{"ok":true}`)
 		case "/second":
 			fmt.Fprint(w, `<!doctype html><title>Second</title><p>second page</p>`)
+		case "/broken":
+			fmt.Fprint(w, `<!doctype html><title>Broken</title><img src="/missing.png"><script src="/missing.js"></script><script>setTimeout(() => lateError(), 50); notDefined()</script>`)
+		case "/missing.png", "/missing.js":
+			http.NotFound(w, r)
 		default:
 			fmt.Fprint(w, fixturePage)
 		}
@@ -48,6 +54,7 @@ func TestIntegration(t *testing.T) {
 
 	cfg := testConfig(path)
 	cfg.DefaultTimeout = 30000
+	cfg.IdleTimeout = 10 * time.Minute // the real CLI must take the flag the server sends
 	mgr := browser.NewManager(cfg)
 	srv := server.NewMCPServer("it", "0", server.WithToolCapabilities(false))
 	reg := RegisterAll(srv, cfg, mgr)
@@ -98,6 +105,17 @@ func TestIntegration(t *testing.T) {
 	expect(call("console", a{"pattern": "clicked"}), "[log] clicked go")
 	expect(call("network", a{"filter": "api.json"}), "GET 200")
 
+	// navigate reports what went wrong while the page loaded, and only that.
+	health := call("navigate", a{"url": site.URL + "/broken"})
+	expect(health, "Page problems during this load: 2 uncaught JS errors and 2 failed requests")
+	expect(health, "- JS error: ReferenceError: notDefined is not defined")
+	expect(health, "- JS error: ReferenceError: lateError is not defined")
+	expect(health, "- 404 Image "+site.URL+"/missing.png")
+	expect(health, "- 404 Script "+site.URL+"/missing.js")
+	if got := call("navigate", a{"url": site.URL}); strings.Contains(got, "Page problems") {
+		t.Fatalf("a healthy page got a health note:\n%s", got)
+	}
+
 	// Features that need agent-browser 0.38+: snapshot deltas and human-like
 	// pointer movement.
 	if v := mgr.CheckVersion(t.Context()); v.Warning != "" {
@@ -147,4 +165,14 @@ func TestIntegration(t *testing.T) {
 	call("storage", a{"action": "set", "key": "k", "value": "v"})
 	expect(call("storage", a{"key": "k"}), "v")
 	expect(call("tabs", a{}), "t1")
+
+	// A browser that closed behind the server's back, as the idle timeout
+	// closes one, is reported on the next call.
+	if _, err := mgr.Run(context.Background(), session, "close"); err != nil {
+		t.Fatal(err)
+	}
+	expect(call("navigate", a{"url": site.URL + "/second"}), "Note: this session's browser had closed since its last use (browsers close after 10m without commands)")
+	if got := call("get", a{"what": "title"}); strings.Contains(got, "had closed") {
+		t.Fatalf("the restart is reported once:\n%s", got)
+	}
 }

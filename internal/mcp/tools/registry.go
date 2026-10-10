@@ -28,6 +28,10 @@ type Registry struct {
 	// devtoolsSettle is how long open_devtools watches the page width for
 	// DevTools docking beside it.
 	devtoolsSettle time.Duration
+	// healthSettle is how long navigate waits after the load before checking
+	// for JS errors and failed requests, so errors thrown just after load
+	// are counted.
+	healthSettle time.Duration
 
 	mu         sync.Mutex
 	recordings map[string]string // session -> last trace or CPU profile file
@@ -51,6 +55,7 @@ func NewRegistry(cfg *config.Config, mgr *browser.Manager) *Registry {
 		dt:             devtools.NewPool(mgr),
 		pausedWait:     3 * time.Second,
 		devtoolsSettle: 1500 * time.Millisecond,
+		healthSettle:   300 * time.Millisecond,
 		recordings:     map[string]string{},
 		toolsets:       make(map[string]string),
 		handlers:       make(map[string]server.ToolHandlerFunc),
@@ -114,9 +119,22 @@ func (r *Registry) add(toolset string, tool mcp.Tool, h server.ToolHandlerFunc) 
 	if !r.cfg.HasToolset(toolset) {
 		return
 	}
+	h = r.noteRestart(h)
 	r.tools = append(r.tools, server.ServerTool{Tool: tool, Handler: h})
 	r.toolsets[tool.Name] = toolset
 	r.handlers[tool.Name] = h
+}
+
+// noteRestart tells the model when the call found the session's browser
+// gone, e.g. closed after the idle timeout, and ran in a fresh one.
+func (r *Registry) noteRestart(h server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		res, err := h(ctx, req)
+		if res != nil && r.mgr.Restarted(getSession(req)) {
+			res.Content = append([]mcp.Content{mcp.NewTextContent(restartNote(r.cfg.IdleTimeout))}, res.Content...)
+		}
+		return res, err
+	}
 }
 
 // Annotation presets. mcp.NewTool defaults every tool to destructive, so each
@@ -135,7 +153,7 @@ func destructive() mcp.ToolOption {
 
 // Shared parameters.
 func sessionParam() mcp.ToolOption {
-	return mcp.WithString("session", mcp.Description("Isolated browser session; omit for the default."))
+	return mcp.WithString("session", mcp.Description("Omit to use the current browser; a new name opens another window."))
 }
 
 func selectorParam(required bool) mcp.ToolOption {

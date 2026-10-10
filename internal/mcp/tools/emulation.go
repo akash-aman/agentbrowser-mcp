@@ -15,7 +15,7 @@ import (
 
 func (r *Registry) registerEmulation() {
 	r.add(config.ToolsetEmulation, mcp.NewTool("emulate",
-		mcp.WithDescription("Set one or more emulation settings in one call: viewport, device, geolocation, offline, extra headers, HTTP auth, color scheme, reduced motion, user agent, and network/CPU throttling."),
+		mcp.WithDescription("Set one or more emulation settings in one call: viewport, device, geolocation, offline, extra headers, HTTP auth, color scheme, reduced motion, user agent, and network/CPU throttling. Use it to check mobile and responsive layouts, dark mode, and the page on slow networks or CPUs."),
 		mcp.WithNumber("width", mcp.Description("Viewport width (with height).")),
 		mcp.WithNumber("height", mcp.Description("Viewport height (with width).")),
 		mcp.WithNumber("scale", mcp.Description("Device pixel ratio, e.g. 2.")),
