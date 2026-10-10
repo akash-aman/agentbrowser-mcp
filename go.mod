@@ -2,6 +2,8 @@ module github.com/xcode-studio/agentbrowser-mcp
 
 go 1.26.1
 
+toolchain go1.26.9
+
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/mark3labs/mcp-go v0.54.1

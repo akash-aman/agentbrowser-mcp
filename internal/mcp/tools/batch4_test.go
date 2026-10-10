@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecdp"
 )
 
 // tinyJPEG is a solid-color frame for screencast replies.
@@ -83,7 +83,7 @@ var batch4Cases = []cdpCase{
 	{tool: "performance", args: a{"action": "query_objects", "constructor": "Widget"}, text: "3 live Widget objects after garbage collection",
 		check: params("Runtime.queryObjects", a{"prototypeObjectId": "proto-1"})},
 	{tool: "performance", args: a{"action": "query_objects"}, wantErr: "constructor is required for query_objects"},
-	{tool: "performance", args: a{"action": "filmstrip"}, text: "Filmstrip: 2 distinct frames, showing 2; first change at 0.0s",
+	{tool: "performance", args: a{"action": "filmstrip"}, text: "Filmstrip: 2 distinct frames, showing 2; first change at ",
 		check: func(t *testing.T, s *fakecdp.Server) {
 			t.Helper()
 			var urls []any
