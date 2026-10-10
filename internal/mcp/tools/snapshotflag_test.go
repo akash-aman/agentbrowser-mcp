@@ -74,7 +74,8 @@ var followUps = []struct {
 }{
 	{"none", nil, ""},
 	{"delta", cmd("snapshot", "-i", "-c", "--delta"), "Snapshot revision 1 (full"},
-	{"diff", cmd("diff", "snapshot", "-c"), "Changes:"},
+	// The server diffs snapshots itself; agent-browser's keeps no baseline.
+	{"diff", cmd("snapshot"), "Changes:"},
 	{"full", cmd("snapshot", "-i", "-c"), "Snapshot:"},
 }
 

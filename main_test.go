@@ -78,6 +78,53 @@ func stopAfterToolCall(t *testing.T, fake *fakecli.Fake, flags ...string) {
 	}
 }
 
+// TestStopDuringASlowCall: Claude Code sends SIGKILL half a second after
+// SIGINT, so a call in flight must not hold up the exit; a server killed
+// first never releases its CDP connections.
+func TestStopDuringASlowCall(t *testing.T) {
+	t.Parallel()
+	fake := fakecli.Install(t)
+	fake.SleepMS(10000, "click")
+	cmd := exec.Command(os.Args[0])
+	// Under -race the runtime sleeps a second at exit unless told not to.
+	cmd.Env = append(os.Environ(), "ABM_RUN_MAIN=1", "ABM_ARGS=--agent-browser-path "+fake.Path, "GORACE=atexit_sleep_ms=0")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(stdin, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`)
+	fmt.Fprintln(stdin, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"click","arguments":{"selector":"#slow","session":"work"}}}`)
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.ContainsFunc(fake.Calls(), func(c []string) bool { return slices.Contains(c, "click") }) {
+		if time.Now().After(deadline) {
+			cmd.Process.Kill()
+			t.Fatal("the click never reached the CLI")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := time.Now()
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("exit: %v", err)
+		}
+		if took := time.Since(start); took > 500*time.Millisecond {
+			t.Fatalf("took %v to stop; the client kills it after 500ms", took)
+		}
+	case <-time.After(5 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("server waited for the slow click instead of stopping")
+	}
+}
+
 func closeCalls(fake *fakecli.Fake) [][]string {
 	var closes [][]string
 	for _, c := range fake.Calls() {

@@ -4,6 +4,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -25,12 +26,31 @@ type Registry struct {
 	// pausedWait is how long a command may wait on an already-paused page
 	// before the tool returns and lets it finish in the background.
 	pausedWait time.Duration
+	// pauseGrace is how long an action that finished while debugging still
+	// watches for a pause: handlers often defer work to a timer or promise,
+	// which reached its breakpoint just after the click returned.
+	pauseGrace time.Duration
+	// macEditing says whether editing shortcuts (Meta+a, Meta+c...) need
+	// their commands sent: on macOS they come from the app menu, so key
+	// events alone do nothing.
+	macEditing bool
+	// snapBase is the last accessibility tree seen per session and scope,
+	// without refs, for snapshot diffs.
+	snapBase map[string][]string
 	// devtoolsSettle is how long open_devtools watches the page width for
 	// DevTools docking beside it.
 	devtoolsSettle time.Duration
+	// healthSettle is how long navigate waits after the load before checking
+	// for JS errors and failed requests, so errors thrown just after load
+	// are counted.
+	healthSettle time.Duration
+	// waitHiddenFor bounds wait for=hidden, like the CLI's own waits.
+	waitHiddenFor time.Duration
 
 	mu         sync.Mutex
-	recordings map[string]string // session -> last trace or CPU profile file
+	recordings map[string]string   // session -> last trace or CPU profile file
+	heapSnaps  map[string][]string // session -> heap snapshot files, oldest first
+	flows      map[string]*flow    // session -> flow being recorded
 	tools      []server.ServerTool
 	toolsets   map[string]string
 	handlers   map[string]server.ToolHandlerFunc
@@ -50,8 +70,15 @@ func NewRegistry(cfg *config.Config, mgr *browser.Manager) *Registry {
 		mgr:            mgr,
 		dt:             devtools.NewPool(mgr),
 		pausedWait:     3 * time.Second,
+		pauseGrace:     300 * time.Millisecond,
+		macEditing:     runtime.GOOS == "darwin",
+		snapBase:       map[string][]string{},
 		devtoolsSettle: 1500 * time.Millisecond,
+		healthSettle:   300 * time.Millisecond,
+		waitHiddenFor:  25 * time.Second,
 		recordings:     map[string]string{},
+		heapSnaps:      map[string][]string{},
+		flows:          map[string]*flow{},
 		toolsets:       make(map[string]string),
 		handlers:       make(map[string]server.ToolHandlerFunc),
 	}
@@ -74,6 +101,8 @@ func NewRegistry(cfg *config.Config, mgr *browser.Manager) *Registry {
 	r.registerSession()
 	r.registerDebugger()
 	r.registerApplication()
+	r.registerElements()
+	r.registerCDP()
 	return r
 }
 
@@ -81,6 +110,20 @@ func (r *Registry) rememberRecording(session, path string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.recordings[r.mgr.ResolveSession(session)] = path
+}
+
+// heapSnapshots returns the session's heap snapshot files, oldest first.
+func (r *Registry) heapSnapshots(session string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.heapSnaps[r.mgr.ResolveSession(session)]...)
+}
+
+func (r *Registry) rememberHeapSnapshot(session, path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := r.mgr.ResolveSession(session)
+	r.heapSnaps[key] = append(r.heapSnaps[key], path)
 }
 
 func (r *Registry) lastRecording(session string) string {
@@ -114,9 +157,22 @@ func (r *Registry) add(toolset string, tool mcp.Tool, h server.ToolHandlerFunc) 
 	if !r.cfg.HasToolset(toolset) {
 		return
 	}
+	h = r.noteRestart(r.recordFlow(tool.Name, h))
 	r.tools = append(r.tools, server.ServerTool{Tool: tool, Handler: h})
 	r.toolsets[tool.Name] = toolset
 	r.handlers[tool.Name] = h
+}
+
+// noteRestart tells the model when the call found the session's browser
+// gone, e.g. closed after the idle timeout, and ran in a fresh one.
+func (r *Registry) noteRestart(h server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		res, err := h(ctx, req)
+		if res != nil && r.mgr.Restarted(getSession(req)) {
+			res.Content = append([]mcp.Content{mcp.NewTextContent(restartNote(r.cfg.IdleTimeout))}, res.Content...)
+		}
+		return res, err
+	}
 }
 
 // Annotation presets. mcp.NewTool defaults every tool to destructive, so each
@@ -135,7 +191,7 @@ func destructive() mcp.ToolOption {
 
 // Shared parameters.
 func sessionParam() mcp.ToolOption {
-	return mcp.WithString("session", mcp.Description("Isolated browser session; omit for the default."))
+	return mcp.WithString("session", mcp.Description("Omit to use the current browser; a new name opens another window."))
 }
 
 func selectorParam(required bool) mcp.ToolOption {
@@ -192,12 +248,12 @@ func (r *Registry) appendSnapshot(ctx context.Context, req mcp.CallToolRequest, 
 		}
 		appendText(res, truncate(formatData(out.Data), r.cfg.MaxOutput))
 	case "diff":
-		out, err := r.mgr.Run(ctx, getSession(req), "diff", "snapshot", "-c")
+		text, err := r.diffSnapshot(ctx, req, "")
 		if err != nil {
 			appendText(res, "snapshot diff failed: "+err.Error())
 			return
 		}
-		appendText(res, "Changes:\n"+truncate(formatSnapshotDiff(out.Data), r.cfg.MaxOutput))
+		appendText(res, "Changes:\n"+truncate(text, r.cfg.MaxOutput))
 	case "full":
 		out, err := r.mgr.Run(ctx, getSession(req), "snapshot", "-i", "-c")
 		if err != nil {
@@ -233,7 +289,15 @@ func (r *Registry) runWhileDebugging(ctx context.Context, req mcp.CallToolReques
 	}
 	select {
 	case res := <-done:
+		select {
+		case pause := <-next:
+			appendText(res, "Then the page paused:\n"+page.Describe(background, pause))
+		case <-time.After(r.pauseGrace):
+		case <-ctx.Done():
+		}
 		return res
+	case <-ctx.Done(): // the call was cancelled or the server is stopping
+		return mcp.NewToolResultError(fmt.Sprintf("%s was cancelled: %v", args[0], ctx.Err()))
 	case pause := <-next:
 		return mcp.NewToolResultText(fmt.Sprintf("%s\n(%s finishes after you resume with the debugger tool)", page.Describe(background, pause), args[0]))
 	case <-stillPaused:

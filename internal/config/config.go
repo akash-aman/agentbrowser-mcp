@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Toolsets that can be enabled with --toolsets.
@@ -74,6 +75,12 @@ type Config struct {
 	// clients, and an MCP reconnect must not kill the browser being worked in.
 	CloseOnExit bool
 
+	// IdleTimeout closes a session's browser after this long without
+	// commands; 0 leaves it to agent-browser, which never closes a headed
+	// one. Each open browser keeps rendering its page, so forgotten windows
+	// add up to real CPU load.
+	IdleTimeout time.Duration
+
 	// DefaultTimeout for agent-browser commands in milliseconds.
 	DefaultTimeout int
 
@@ -98,6 +105,12 @@ type intSetting struct {
 	target         *int
 	env, flag, use string
 	def            int
+}
+
+type durationSetting struct {
+	target         *time.Duration
+	env, flag, use string
+	def            time.Duration
 }
 
 func (c *Config) stringSettings() []stringSetting {
@@ -148,6 +161,12 @@ func (c *Config) intSettings() []intSetting {
 	}
 }
 
+func (c *Config) durationSettings() []durationSetting {
+	return []durationSetting{
+		{&c.IdleTimeout, "AGENT_BROWSER_MCP_IDLE_TIMEOUT", "idle-timeout", "Close a session's browser after this long without commands, e.g. 15m or 1h (0 = agent-browser's default, which keeps headed browsers open)", 15 * time.Minute},
+	}
+}
+
 // Load reads configuration from environment variables, then applies flag
 // overrides from args.
 func Load(args []string) (*Config, error) {
@@ -183,6 +202,9 @@ func (c *Config) bindFlags(fs *flag.FlagSet) {
 	}
 	for _, s := range c.intSettings() {
 		fs.IntVar(s.target, s.flag, envInt(s.env, s.def), s.use)
+	}
+	for _, s := range c.durationSettings() {
+		fs.DurationVar(s.target, s.flag, envDuration(s.env, s.def), s.use)
 	}
 }
 
@@ -233,6 +255,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("timeout must be positive, got %d", c.DefaultTimeout)
 	case c.MaxOutput < 0:
 		return fmt.Errorf("max-output must be >= 0, got %d", c.MaxOutput)
+	case c.IdleTimeout < 0:
+		return fmt.Errorf("idle-timeout must be >= 0, got %v", c.IdleTimeout)
 	case c.AutoConnect && c.CDP != "":
 		return fmt.Errorf("auto-connect and cdp are mutually exclusive")
 	case !slices.Contains(InputModes, c.InputMode):
@@ -251,6 +275,13 @@ func envOr(key, def string) string {
 func envInt(key string, def int) int {
 	if n, err := strconv.Atoi(os.Getenv(key)); err == nil {
 		return n
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(key)); err == nil {
+		return d
 	}
 	return def
 }

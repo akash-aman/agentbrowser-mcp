@@ -11,7 +11,7 @@ import (
 
 func (r *Registry) registerApplication() {
 	r.add(config.ToolsetStorage, mcp.NewTool("application",
-		mcp.WithDescription("DevTools Application panel for the page's origin: IndexedDB databases and records, Cache Storage, service workers, web app manifest, storage usage/quota, or clear all site data."),
+		mcp.WithDescription("DevTools Application and Security panels for the page's origin: IndexedDB databases and records, Cache Storage, service workers, web app manifest, storage usage/quota, clear all site data, the frame tree, the connection and certificate, passkeys in the virtual authenticator, and a back/forward cache test (navigates away and back). Use it for stale content, caching, offline, PWA, iframe, HTTPS and slow back-navigation problems."),
 		mcp.WithString("action", mcp.Required(), mcp.Enum(applicationActions...)),
 		mcp.WithString("database", mcp.Description("indexeddb_read: database name.")),
 		mcp.WithString("store", mcp.Description("indexeddb_read: object store name.")),
@@ -21,7 +21,7 @@ func (r *Registry) registerApplication() {
 	), r.handleApplication)
 }
 
-var applicationActions = []string{"indexeddb", "indexeddb_read", "cache_storage", "service_workers", "manifest", "storage_usage", "clear_site_data"}
+var applicationActions = []string{"indexeddb", "indexeddb_read", "cache_storage", "service_workers", "manifest", "storage_usage", "clear_site_data", "bfcache", "frames", "security", "credentials"}
 
 func (r *Registry) handleApplication(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	b := newArgv(req)
@@ -59,6 +59,14 @@ func applicationAction(ctx context.Context, b *argv, page *devtools.Page, action
 		return page.Manifest(ctx)
 	case "storage_usage":
 		return page.StorageUsage(ctx)
+	case "bfcache":
+		return page.BackForwardCache(ctx)
+	case "frames":
+		return page.Frames(ctx)
+	case "security":
+		return page.Security(ctx)
+	case "credentials":
+		return page.Credentials(ctx)
 	}
 	return page.ClearSiteData(ctx)
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -32,6 +33,9 @@ type Reply struct {
 	Events []Event
 	Error  string
 	Code   int // protocol error code; default -32000
+	// Delay holds the result back while the server goes on answering other
+	// calls, as Chrome does for a script stopped at a breakpoint.
+	Delay time.Duration
 }
 
 // Handler answers one call.
@@ -48,7 +52,10 @@ type Server struct {
 	http *httptest.Server
 
 	mu       sync.Mutex
-	pages    []string // URL of each tab; tab i has target T<i+1> and session S<i+1>
+	pages    []string          // URL of each tab; tab i has target T<i+1> and session S<i+1>
+	titles   map[string]string // target id -> title; default "Fake"
+	contexts map[string]string // target id -> browser context; default "DEFAULT"
+	extra    []any             // other targets, such as workers and iframes
 	handlers map[string]Handler
 	calls    []Call
 	conns    []*websocket.Conn
@@ -82,6 +89,33 @@ func (s *Server) AddPage(url string) {
 	s.pages = append(s.pages, url)
 }
 
+// SetTitle sets the title Target.getTargets reports for a target.
+func (s *Server) SetTitle(targetID, title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.titles == nil {
+		s.titles = map[string]string{}
+	}
+	s.titles[targetID] = title
+}
+
+// SetContext puts a target in another browser context than "DEFAULT".
+func (s *Server) SetContext(targetID, browserContextID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.contexts == nil {
+		s.contexts = map[string]string{}
+	}
+	s.contexts[targetID] = browserContextID
+}
+
+// AddTarget adds a non-page target (worker, iframe) to Target.getTargets.
+func (s *Server) AddTarget(info map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.extra = append(s.extra, info)
+}
+
 // Handle sets the reply for a method.
 func (s *Server) Handle(method string, h Handler) {
 	s.mu.Lock()
@@ -101,11 +135,18 @@ func (s *Server) Calls() []Call {
 	return append([]Call(nil), s.calls...)
 }
 
-// Methods returns the method names of Calls.
+// PausedBanner is the call that shows or hides the "Paused in debugger"
+// banner. It is sent in the background after each pause and resume, so
+// Methods leaves it out to keep call orders exact.
+const PausedBanner = "Overlay.setPausedInDebuggerMessage"
+
+// Methods returns the method names of Calls, except PausedBanner.
 func (s *Server) Methods() []string {
 	var out []string
 	for _, c := range s.Calls() {
-		out = append(out, c.Method)
+		if c.Method != PausedBanner {
+			out = append(out, c.Method)
+		}
 	}
 	return out
 }
@@ -203,6 +244,13 @@ func (s *Server) answer(c *websocket.Conn, req request) {
 		}
 		msg["result"] = result
 	}
+	if reply.Delay > 0 {
+		go func() {
+			time.Sleep(reply.Delay)
+			s.send(c, msg)
+		}()
+		return
+	}
 	s.send(c, msg)
 }
 
@@ -210,12 +258,23 @@ func (s *Server) reply(req request) Reply {
 	s.mu.Lock()
 	var pages []any
 	for i, url := range s.pages {
-		pages = append(pages, map[string]any{"targetId": fmt.Sprintf("T%d", i+1), "type": "page", "url": url, "title": "Fake"})
+		id := fmt.Sprintf("T%d", i+1)
+		title, ok := s.titles[id]
+		if !ok {
+			title = "Fake"
+		}
+		browserContext, ok := s.contexts[id]
+		if !ok {
+			browserContext = "DEFAULT"
+		}
+		pages = append(pages, map[string]any{"targetId": id, "type": "page", "url": url, "title": title, "browserContextId": browserContext})
 	}
+	extra := append([]any(nil), s.extra...)
 	s.mu.Unlock()
 	switch req.Method {
 	case "Target.getTargets":
-		return Reply{Result: map[string]any{"targetInfos": append(pages, map[string]any{"targetId": "T0", "type": "browser_ui", "url": "chrome://ui"})}}
+		all := append(append(pages, extra...), map[string]any{"targetId": "T0", "type": "browser_ui", "url": "chrome://ui"})
+		return Reply{Result: map[string]any{"targetInfos": all}}
 	case "Target.attachToTarget":
 		return Reply{Result: map[string]any{"sessionId": "S" + strings.TrimPrefix(fmt.Sprint(req.Params["targetId"]), "T")}}
 	case "Target.getTargetInfo":

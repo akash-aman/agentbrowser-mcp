@@ -1,12 +1,17 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/vercel-labs/agent-browser-mcp/internal/config"
+	"github.com/vercel-labs/agent-browser-mcp/internal/devtools"
 )
 
 func (r *Registry) registerInfo() {
@@ -22,7 +27,7 @@ func (r *Registry) registerInfo() {
 		mcp.WithBoolean("delta", mcp.Description("Only @refs added/changed/removed since the last delta snapshot; full tree on the first call, after navigation or when options change.")),
 		mcp.WithBoolean("full", mcp.Description("With delta: return the full tree and reset the baseline.")),
 		sessionParam(), readOnly(),
-	), r.cli(snapshotArgv))
+	), r.handleSnapshot)
 
 	r.add(core, mcp.NewTool("page_text",
 		mcp.WithDescription("Readable text of the page or one element. Prefer over snapshot when you only need to read content."),
@@ -36,10 +41,53 @@ func (r *Registry) registerInfo() {
 		selectorParam(false),
 		mcp.WithString("attribute", mcp.Description("Attribute name for what=attr.")),
 		sessionParam(), readOnly(),
-	), r.cli(getArgv))
+	), r.handleGet)
+}
+
+// handleGet shows the common computed styles rather than all ~400 (10 KB).
+func (r *Registry) handleGet(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if req.GetString("what", "") != "styles" {
+		return r.cli(getArgv)(ctx, req)
+	}
+	args, err := getArgv(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out, err := r.mgr.Run(ctx, getSession(req), args...)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	var data struct {
+		Styles map[string]string `json:"styles"`
+	}
+	if json.Unmarshal(out.Data, &data) != nil || len(data.Styles) == 0 {
+		return textResult(body(out), r.cfg.MaxOutput), nil
+	}
+	text := devtools.FormatComputed(data.Styles, nil) + "\n(common properties; elements computed with properties reads any other)"
+	return textResult(text, r.cfg.MaxOutput), nil
 }
 
 var getWhats = []string{"text", "html", "value", "attr", "title", "url", "count", "box", "styles", "cdp_url", "visible", "enabled", "checked"}
+
+// handleSnapshot also keeps the full tree of a plain snapshot (not
+// interactive, no depth or delta) as the baseline for the next snapshot
+// diff, so "snapshot, act, diff" shows what the action changed.
+func (r *Registry) handleSnapshot(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	plain := !req.GetBool("interactive", false) && req.GetFloat("depth", 0) == 0 &&
+		!req.GetBool("delta", false) && !req.GetBool("full", false) && !req.GetBool("urls", false)
+	res, err := r.cli(snapshotArgv)(ctx, req)
+	if res == nil || res.IsError || !plain {
+		return res, err
+	}
+	if page := r.dt.Existing(getSession(req)); page != nil && page.Paused() != nil {
+		return res, err
+	}
+	selector := req.GetString("selector", "")
+	if lines, err := r.fullSnapshot(ctx, req, selector); err == nil {
+		r.swapSnapshot(req, selector, lines)
+	}
+	return res, err
+}
 
 func snapshotArgv(req mcp.CallToolRequest) ([]string, error) {
 	b := newArgv(req, "snapshot").boolFlag("-i", "interactive")
@@ -80,17 +128,19 @@ func (r *Registry) registerFind() {
 		mcp.WithString("by", mcp.Required(), mcp.Enum(findBys...)),
 		mcp.WithString("value", mcp.Required(), mcp.Description("Role, text, label, placeholder, alt, title, test id, or CSS selector for first/last/nth/all.")),
 		mcp.WithString("action", mcp.Enum(findActions...), mcp.Description("Default click. text returns the element's text.")),
-		mcp.WithString("input", mcp.Description("Text for fill/type.")),
+		mcp.WithString("input", mcp.Description("Text for fill.")),
 		mcp.WithString("name", mcp.Description("Accessible name filter for by=role.")),
 		mcp.WithBoolean("exact", mcp.Description("Exact text match.")),
 		mcp.WithNumber("index", mcp.Description("0-based index for by=nth.")),
 		snapshotParam(), sessionParam(), mutating(),
-	), r.action(findArgv))
+	), r.handleFind)
 }
 
 var (
-	findBys     = []string{"role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last", "nth", "all"}
-	findActions = []string{"click", "fill", "type", "hover", "focus", "check", "uncheck", "text"}
+	findBys = []string{"role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last", "nth", "all"}
+	// The actions agent-browser's find takes; it rejects type, focus and
+	// uncheck ("Unknown action"), so they are not offered.
+	findActions = []string{"click", "fill", "hover", "check", "text"}
 	exactBys    = []string{"role", "text", "label", "placeholder", "alt", "title"}
 )
 
@@ -109,7 +159,7 @@ func findArgv(req mcp.CallToolRequest) ([]string, error) {
 		b.add(b.indexArg())
 	}
 	b.add(value, action)
-	if action == "fill" || action == "type" {
+	if action == "fill" {
 		b.add(b.inputArg(action))
 	}
 	if by == "role" {
@@ -139,3 +189,29 @@ func (b *argv) inputArg(action string) string {
 func jsString(s string) string {
 	return compactJSON(s)
 }
+
+// handleFind names the element by how it was found instead of the marker
+// attribute agent-browser puts on it ([data-agent-browser-located='true']).
+func (r *Registry) handleFind(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	res, err := r.action(findArgv)(ctx, req)
+	if res == nil {
+		return res, err
+	}
+	how := fmt.Sprintf("the element with %s %q", req.GetString("by", ""), req.GetString("value", ""))
+	if name := req.GetString("name", ""); name != "" {
+		how = fmt.Sprintf("the %s named %q", req.GetString("value", ""), name)
+	}
+	for i, c := range res.Content {
+		if t, ok := c.(mcp.TextContent); ok {
+			t.Text = strings.ReplaceAll(t.Text, "[data-agent-browser-located='true']", how)
+			t.Text = foundRef.ReplaceAllString(t.Text, "${1}: "+how)
+			res.Content[i] = t
+		}
+	}
+	return res, err
+}
+
+// foundRef matches "clicked: @e1": the CLI's ref for the element it found is
+// not one from the last snapshot, so acting on it later would hit another
+// element.
+var foundRef = regexp.MustCompile(`(?m)^(\w+): @e\d+$`)

@@ -56,14 +56,23 @@ type Page struct {
 	// detached is set when Chrome ends the session, e.g. the tab was closed.
 	detached atomic.Bool
 
+	// bannerMu orders the "Paused in debugger" banner updates.
+	bannerMu sync.Mutex
+
 	mu       sync.Mutex
 	coverage *coverageRun
 	throttle Throttle
 	dbg      *debuggerState
 	issues   *issueLog
 	// perfSince is when Performance metrics started counting.
-	perfSince time.Time
-	rendering map[string]bool // overlay label -> on
+	perfSince     time.Time
+	rendering     map[string]bool     // overlay label -> on
+	cssSheets     map[string]cssSheet // by style sheet ID, once elements enables CSS
+	contexts      map[string]int      // frame ID -> default JS context, once EvaluateIn runs
+	overrides     map[string]override // URL -> file served instead, see SetOverride
+	capture       *netCapture         // requests and socket messages, once StartCapture runs
+	authenticator string              // virtual WebAuthn authenticator ID, when on
+	emulation     Emulation
 }
 
 // ErrPaused is returned by non-debugger features while the page is paused,

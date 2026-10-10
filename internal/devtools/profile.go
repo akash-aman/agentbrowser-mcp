@@ -19,14 +19,67 @@ func SummarizeCPUProfile(r io.Reader, top int) (string, error) {
 	}
 	var prof cpuProfile
 	if json.Unmarshal(data, &prof) == nil && len(prof.Nodes) > 0 {
-		return selfTimeSummary(prof.selfTimes(), (prof.EndTime-prof.StartTime)/1000, top), nil
+		t := prof.tree()
+		return selfTimeSummary(t, (prof.EndTime-prof.StartTime)/1000, top), nil
 	}
 	events, err := traceEvents(data)
 	if err != nil {
 		return "", fmt.Errorf("parse cpu profile: %w", err)
 	}
-	self, totalMs := traceSelfTimes(events)
-	return selfTimeSummary(self, totalMs, top), nil
+	t, totalMs := traceSelfTimes(events)
+	return selfTimeSummary(t, totalMs, top), nil
+}
+
+// nodeKey names a profile node; traces can hold several profiles.
+type nodeKey struct {
+	profile string
+	id      int
+}
+
+// callTree is a profile's nodes with their self time, for self and total
+// (with callees) times per function.
+type callTree struct {
+	frames map[nodeKey]callFrame
+	parent map[nodeKey]nodeKey
+	self   map[nodeKey]float64 // ms
+}
+
+func newCallTree() callTree {
+	return callTree{frames: map[nodeKey]callFrame{}, parent: map[nodeKey]nodeKey{}, self: map[nodeKey]float64{}}
+}
+
+// selfByFunction sums self time per function.
+func (t callTree) selfByFunction() map[callFrame]float64 {
+	out := map[callFrame]float64{}
+	for k, ms := range t.self {
+		out[t.frames[k]] += ms
+	}
+	return out
+}
+
+// totalByFunction gives each function the self time of every sample with it
+// on the stack, once per sample even when it recurses, like the total time in
+// DevTools' Bottom-Up and Call Tree views.
+func (t callTree) totalByFunction() map[callFrame]float64 {
+	out := map[callFrame]float64{}
+	for k, ms := range t.self {
+		if ms <= 0 {
+			continue
+		}
+		seen := map[callFrame]bool{}
+		for n, depth := k, 0; depth < 1000; depth++ {
+			if f := t.frames[n]; !seen[f] {
+				seen[f] = true
+				out[f] += ms
+			}
+			p, ok := t.parent[n]
+			if !ok {
+				break
+			}
+			n = p
+		}
+	}
+	return out
 }
 
 type callFrame struct {
@@ -39,6 +92,8 @@ type profileNode struct {
 	ID        int       `json:"id"`
 	HitCount  int       `json:"hitCount"`
 	CallFrame callFrame `json:"callFrame"`
+	Children  []int     `json:"children"` // .cpuprofile files
+	Parent    int       `json:"parent"`   // trace ProfileChunk nodes
 }
 
 type cpuProfile struct {
@@ -47,21 +102,25 @@ type cpuProfile struct {
 	EndTime   float64       `json:"endTime"`
 }
 
-// selfTimes spreads the profile's duration over nodes by hit count.
-func (p cpuProfile) selfTimes() map[callFrame]float64 {
+// tree spreads the profile's duration over nodes by hit count.
+func (p cpuProfile) tree() callTree {
+	t := newCallTree()
 	hits := 0
 	for _, n := range p.Nodes {
 		hits += n.HitCount
+		t.frames[nodeKey{id: n.ID}] = n.CallFrame
+		for _, c := range n.Children {
+			t.parent[nodeKey{id: c}] = nodeKey{id: n.ID}
+		}
 	}
-	self := map[callFrame]float64{}
 	if hits == 0 {
-		return self
+		return t
 	}
 	msPerHit := (p.EndTime - p.StartTime) / 1000 / float64(hits)
 	for _, n := range p.Nodes {
-		self[n.CallFrame] += float64(n.HitCount) * msPerHit
+		t.self[nodeKey{id: n.ID}] += float64(n.HitCount) * msPerHit
 	}
-	return self
+	return t
 }
 
 // traceSelfTimes rebuilds self time from ProfileChunk events. Each time delta
@@ -70,7 +129,7 @@ func (p cpuProfile) selfTimes() map[callFrame]float64 {
 // written by V8's profiler thread; the "Profile" event with the same id names
 // the thread being profiled, and only renderer main threads are counted when
 // the trace names them.
-func traceSelfTimes(events []traceEvent) (map[callFrame]float64, float64) {
+func traceSelfTimes(events []traceEvent) (callTree, float64) {
 	type chunk struct {
 		CPUProfile struct {
 			Nodes   []profileNode `json:"nodes"`
@@ -85,9 +144,8 @@ func traceSelfTimes(events []traceEvent) (map[callFrame]float64, float64) {
 			profiled[string(e.ID)] = [2]int{e.Pid, e.Tid}
 		}
 	}
-	frames := map[string]map[int]callFrame{} // profile id -> node id -> frame
-	last := map[string]int{}                 // profile id -> node of the previous sample
-	self := map[callFrame]float64{}
+	t := newCallTree()
+	last := map[string]int{} // profile id -> node of the previous sample
 	totalUs := 0.0
 	for _, e := range events {
 		if e.Name != "ProfileChunk" {
@@ -107,36 +165,68 @@ func traceSelfTimes(events []traceEvent) (map[callFrame]float64, float64) {
 		if json.Unmarshal(e.Args, &args) != nil {
 			continue
 		}
-		nodes := frames[profile]
-		if nodes == nil {
-			nodes = map[int]callFrame{}
-			frames[profile] = nodes
-		}
 		for _, n := range args.Data.CPUProfile.Nodes {
-			nodes[n.ID] = n.CallFrame
+			t.frames[nodeKey{profile, n.ID}] = n.CallFrame
+			if n.Parent != 0 {
+				t.parent[nodeKey{profile, n.ID}] = nodeKey{profile, n.Parent}
+			}
 		}
 		deltas := args.Data.TimeDeltas
 		for i, id := range args.Data.CPUProfile.Samples {
 			if prev, ok := last[profile]; ok && i < len(deltas) {
-				self[nodes[prev]] += deltas[i] / 1000
+				t.self[nodeKey{profile, prev}] += deltas[i] / 1000
 				totalUs += deltas[i]
 			}
 			last[profile] = id
 		}
 	}
-	return self, totalUs / 1000
+	return t, totalUs / 1000
 }
 
-// selfTimeSummary renders the top functions by self time, leaving out idle.
-func selfTimeSummary(self map[callFrame]float64, totalMs float64, top int) string {
-	type fn struct {
-		name string
-		ms   float64
+// selfTimeSummary renders the top functions by self time, leaving out idle,
+// then the top by total time (with the functions they call) where that
+// tells something self time does not.
+func selfTimeSummary(t callTree, totalMs float64, top int) string {
+	self := ranked(t.selfByFunction())
+	if len(self) == 0 || totalMs <= 0 {
+		return fmt.Sprintf("CPU profile: %.0f ms, no samples", totalMs)
 	}
-	byName := map[string]*fn{}
-	for f, ms := range self {
+	lines := []string{fmt.Sprintf("CPU profile: %.0f ms; top functions by self time:", totalMs)}
+	selfMs := map[string]float64{}
+	for _, f := range self {
+		selfMs[f.name] = f.ms
+	}
+	for _, f := range self[:min(top, len(self))] {
+		lines = append(lines, fmt.Sprintf("  %7.1f ms %5.1f%%  %s", f.ms, 100*f.ms/totalMs, f.name))
+	}
+	var callers []string
+	for _, f := range ranked(t.totalByFunction()) {
+		if len(callers) == top {
+			break
+		}
+		if f.ms > selfMs[f.name]+0.05 { // spends time in callees
+			callers = append(callers, fmt.Sprintf("  %7.1f ms %5.1f%%  %s", f.ms, 100*f.ms/totalMs, f.name))
+		}
+	}
+	if len(callers) > 0 {
+		lines = append(lines, "top by total time, including the functions they call:")
+		lines = append(lines, callers...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+type rankedFn struct {
+	name string
+	ms   float64
+}
+
+// ranked names functions as DevTools does and sorts them by time, leaving
+// out idle time and the synthetic root.
+func ranked(times map[callFrame]float64) []rankedFn {
+	byName := map[string]float64{}
+	for f, ms := range times {
 		name := f.FunctionName
-		if name == "(idle)" || name == "(root)" || ms <= 0 {
+		if name == "(idle)" || name == "(root)" || name == "(program)" || ms <= 0 {
 			continue
 		}
 		if name == "" {
@@ -145,24 +235,14 @@ func selfTimeSummary(self map[callFrame]float64, totalMs float64, top int) strin
 		if f.URL != "" {
 			name += fmt.Sprintf(" (%s:%d)", f.URL, f.LineNumber+1)
 		}
-		if byName[name] == nil {
-			byName[name] = &fn{name: name}
-		}
-		byName[name].ms += ms
+		byName[name] += ms
 	}
-	if len(byName) == 0 || totalMs <= 0 {
-		return fmt.Sprintf("CPU profile: %.0f ms, no samples", totalMs)
+	out := make([]rankedFn, 0, len(byName))
+	for name, ms := range byName {
+		out = append(out, rankedFn{name, ms})
 	}
-	fns := make([]fn, 0, len(byName))
-	for _, f := range byName {
-		fns = append(fns, *f)
-	}
-	slices.SortFunc(fns, func(a, b fn) int { return cmp.Or(cmp.Compare(b.ms, a.ms), cmp.Compare(a.name, b.name)) })
-	lines := []string{fmt.Sprintf("CPU profile: %.0f ms; top functions by self time:", totalMs)}
-	for _, f := range fns[:min(top, len(fns))] {
-		lines = append(lines, fmt.Sprintf("  %7.1f ms %5.1f%%  %s", f.ms, 100*f.ms/totalMs, f.name))
-	}
-	return strings.Join(lines, "\n")
+	slices.SortFunc(out, func(a, b rankedFn) int { return cmp.Or(cmp.Compare(b.ms, a.ms), cmp.Compare(a.name, b.name)) })
+	return out
 }
 
 type traceEvent struct {
@@ -216,7 +296,143 @@ func SummarizeTrace(r io.Reader, top int) (string, error) {
 	for _, e := range long[:min(top, len(long))] {
 		lines = append(lines, fmt.Sprintf("  %6.0f ms task at +%.0f ms", e.Dur/1000, (e.Ts-start)/1000))
 	}
+	if insights := traceInsights(events); len(insights) > 0 {
+		lines = append(lines, "Insights:")
+		lines = append(lines, insights...)
+	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// traceInsights reads what the Performance panel's Insights sidebar shows
+// for a page load in the trace: paint timings and the LCP element, layout
+// shifts, and render-blocking requests.
+func traceInsights(events []traceEvent) []string {
+	type data struct {
+		Data struct {
+			NavigationID         string  `json:"navigationId"`
+			IsOutermostMainFrame bool    `json:"isOutermostMainFrame"`
+			CandidateIndex       int     `json:"candidateIndex"`
+			NodeName             string  `json:"nodeName"`
+			Size                 float64 `json:"size"`
+			Type                 string  `json:"type"`
+			Score                float64 `json:"score"`
+			HadRecentInput       bool    `json:"had_recent_input"`
+			IsMainFrame          bool    `json:"is_main_frame"`
+			MaxDistance          float64 `json:"frame_max_distance"`
+			ImpactedNodes        []any   `json:"impacted_nodes"`
+			URL                  string  `json:"url"`
+			ResourceType         string  `json:"resourceType"`
+			RenderBlocking       string  `json:"renderBlocking"`
+			RequestID            string  `json:"requestId"`
+		} `json:"data"`
+	}
+	parse := func(e traceEvent) data {
+		var d data
+		json.Unmarshal(e.Args, &d)
+		return d
+	}
+	navStart := map[string]float64{}
+	finished := map[string]float64{}
+	for _, e := range events {
+		switch e.Name {
+		case "navigationStart":
+			if d := parse(e); d.Data.IsOutermostMainFrame && d.Data.NavigationID != "" {
+				navStart[d.Data.NavigationID] = e.Ts
+			}
+		case "ResourceFinish":
+			finished[parse(e).Data.RequestID] = e.Ts
+		}
+	}
+	var out []string
+	since := func(id string, ts float64) (float64, bool) {
+		start, ok := navStart[id]
+		return (ts - start) / 1000, ok
+	}
+	// The paints of the last load in the trace, each timed from its own
+	// navigation.
+	var fcp, lcp *traceEvent
+	for i, e := range events {
+		switch e.Name {
+		case "firstContentfulPaint":
+			if _, ok := navStart[parse(e).Data.NavigationID]; ok && (fcp == nil || e.Ts > fcp.Ts) {
+				fcp = &events[i]
+			}
+		case "largestContentfulPaint::Candidate":
+			d := parse(e)
+			if _, ok := navStart[d.Data.NavigationID]; ok && d.Data.IsOutermostMainFrame && (lcp == nil || e.Ts > lcp.Ts) {
+				lcp = &events[i]
+			}
+		}
+	}
+	if fcp != nil {
+		ms, _ := since(parse(*fcp).Data.NavigationID, fcp.Ts)
+		out = append(out, fmt.Sprintf("  FCP %.0f ms after navigation", ms))
+	}
+	if lcp != nil {
+		d := parse(*lcp)
+		ms, _ := since(d.Data.NavigationID, lcp.Ts)
+		article := "a"
+		if strings.ContainsAny(d.Data.Type[:min(1, len(d.Data.Type))], "aeiou") {
+			article = "an"
+		}
+		out = append(out, fmt.Sprintf("  LCP %.0f ms: %s %s element <%s> of %.0f px²", ms, article, d.Data.Type, strings.ToLower(d.Data.NodeName), d.Data.Size))
+	}
+	lastNav := ""
+	if lcp != nil {
+		lastNav = parse(*lcp).Data.NavigationID
+	}
+	cls, n := 0.0, 0
+	var worst traceEvent
+	worstScore := 0.0
+	for _, e := range events {
+		if e.Name != "LayoutShift" {
+			continue
+		}
+		d := parse(e)
+		if d.Data.HadRecentInput || !d.Data.IsMainFrame {
+			continue
+		}
+		cls += d.Data.Score
+		n++
+		if d.Data.Score > worstScore {
+			worst, worstScore = e, d.Data.Score
+		}
+	}
+	if n > 0 {
+		line := fmt.Sprintf("  CLS %.3f from %d layout %s", cls, n, map[bool]string{true: "shift", false: "shifts"}[n == 1])
+		if worstScore > 0 {
+			d := parse(worst)
+			at := ""
+			if ms, ok := since(lastNav, worst.Ts); ok {
+				at = fmt.Sprintf(" at %.0f ms", ms)
+			}
+			line += fmt.Sprintf("; the largest (%.3f%s) moved %d elements by up to %.0f px", worstScore, at, len(d.Data.ImpactedNodes), d.Data.MaxDistance)
+		}
+		out = append(out, line)
+	}
+	var blocking []string
+	for _, e := range events {
+		if e.Name != "ResourceSendRequest" {
+			continue
+		}
+		d := parse(e)
+		kind := map[string]string{"blocking": "render-blocking", "in_body_parser_blocking": "parser-blocking"}[d.Data.RenderBlocking]
+		if kind == "" {
+			continue
+		}
+		item := fmt.Sprintf("%s (%s, %s", d.Data.URL, d.Data.ResourceType, kind)
+		if end, ok := finished[d.Data.RequestID]; ok && end-e.Ts >= 1000 {
+			item += fmt.Sprintf(", %.0f ms", (end-e.Ts)/1000)
+		}
+		blocking = append(blocking, item+")")
+	}
+	if len(blocking) > 0 {
+		out = append(out, "  requests that hold up the first render:")
+		for _, b := range blocking[:min(8, len(blocking))] {
+			out = append(out, "    "+b)
+		}
+	}
+	return out
 }
 
 // mainThreadTasks returns the task events on renderer main threads, using

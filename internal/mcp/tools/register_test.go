@@ -2,6 +2,7 @@ package tools
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/vercel-labs/agent-browser-mcp/internal/config"
@@ -12,7 +13,7 @@ var wantToolsets = map[string][]string{
 		"upload_file", "download", "eval_script", "close_browser", "snapshot", "page_text", "get", "find", "wait", "screenshot",
 		"mouse", "tabs", "dialog", "console", "batch", "help"},
 	config.ToolsetNetwork:   {"network"},
-	config.ToolsetDevtools:  {"save_pdf", "performance", "react", "record", "diff", "debug_ui", "debugger"},
+	config.ToolsetDevtools:  {"save_pdf", "performance", "react", "record", "diff", "debug_ui", "debugger", "elements", "cdp"},
 	config.ToolsetEmulation: {"emulate"},
 	config.ToolsetStorage:   {"cookies", "storage", "state", "clipboard", "session", "auth", "application"},
 }
@@ -72,7 +73,7 @@ func TestToolsetAssignment(t *testing.T) {
 func TestToolAnnotations(t *testing.T) {
 	t.Parallel()
 	readOnlyTools := []string{"snapshot", "page_text", "get", "wait", "screenshot"}
-	destructiveTools := []string{"close_browser", "cookies", "storage", "state", "application"}
+	destructiveTools := []string{"close_browser", "cookies", "storage", "state", "application", "cdp"}
 	e := newEnv(t)
 	for _, st := range e.reg.Tools() {
 		ann, name := st.Tool.Annotations, st.Tool.Name
@@ -94,19 +95,27 @@ func TestEveryToolTakesSession(t *testing.T) {
 		if st.Tool.Name == "help" {
 			continue
 		}
-		if _, ok := st.Tool.InputSchema.Properties["session"]; !ok {
+		p, ok := st.Tool.InputSchema.Properties["session"].(map[string]any)
+		if !ok {
 			t.Errorf("%s has no session parameter", st.Tool.Name)
+			continue
+		}
+		// Models otherwise open a session per task, each in its own window.
+		if d, _ := p["description"].(string); !strings.Contains(d, "opens another window") {
+			t.Errorf("%s session description %q does not warn that a new session opens a window", st.Tool.Name, d)
 		}
 	}
 }
 
 // TestSchemaBudget stops tool schemas from creeping back toward the 1.x size
 // (150 tools, 67 KB of compact JSON sent with every request). The budget
-// covers all toolsets including the CDP debugger, profiling and application
-// tools; --toolsets core is about half of it.
+// covers all toolsets including the CDP debugger, profiling, application and
+// Elements tools, and descriptions that say when to reach for each DevTools
+// tool; --toolsets core is under half of it. Claude Code loads schemas on
+// demand, so most of this is only sent when a tool is first used.
 func TestSchemaBudget(t *testing.T) {
 	t.Parallel()
-	const budget = 36 << 10
+	const budget = 48 << 10
 	e := newEnv(t)
 	size := len(e.toolsList())
 	t.Logf("tools/list with all toolsets: %d tools, %d bytes", len(e.reg.Tools()), size)

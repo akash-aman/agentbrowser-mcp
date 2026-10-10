@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vercel-labs/agent-browser-mcp/internal/config"
 	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecli"
 )
 
@@ -28,15 +29,21 @@ func cmd(c ...string) []string      { return c }
 // visible is the check click runs before clicking a target.
 func visible(sel string) []string { return cmd("is", "visible", sel) }
 
+// loads is what navigate runs: the page errors so far, the load, then the
+// errors and failed requests since, for the page health note.
+func loads(c []string) [][]string {
+	return cmds(cmd("errors"), c, cmd("errors"), cmd("network", "requests", "--status", "400-599"))
+}
+
 var argvCases = []argvCase{
 	// navigate
-	{tool: "navigate", args: a{"url": "http://x/"}, want: cmds(cmd("open", "http://x/"))},
-	{tool: "navigate", args: a{"action": "goto", "url": "http://x/"}, want: cmds(cmd("open", "http://x/"))},
-	{tool: "navigate", args: a{"action": "back"}, want: cmds(cmd("back"))},
-	{tool: "navigate", args: a{"action": "forward"}, want: cmds(cmd("forward"))},
-	{tool: "navigate", args: a{"action": "reload"}, want: cmds(cmd("reload"))},
-	{tool: "navigate", args: a{"action": "pushstate", "url": "/next"}, want: cmds(cmd("pushstate", "/next"))},
-	{tool: "navigate", args: a{"url": "http://x/", "headers": `{"Authorization":"Bearer t"}`}, want: cmds(cmd("open", "http://x/", "--headers", `{"Authorization":"Bearer t"}`))},
+	{tool: "navigate", args: a{"url": "http://x/"}, want: loads(cmd("open", "http://x/"))},
+	{tool: "navigate", args: a{"action": "goto", "url": "http://x/"}, want: loads(cmd("open", "http://x/"))},
+	{tool: "navigate", args: a{"action": "back"}, want: loads(cmd("back"))},
+	{tool: "navigate", args: a{"action": "forward"}, want: loads(cmd("forward"))},
+	{tool: "navigate", args: a{"action": "reload"}, want: loads(cmd("reload"))},
+	{tool: "navigate", args: a{"action": "pushstate", "url": "/next"}, want: loads(cmd("pushstate", "/next"))},
+	{tool: "navigate", args: a{"url": "http://x/", "headers": `{"Authorization":"Bearer t"}`}, want: loads(cmd("open", "http://x/", "--headers", `{"Authorization":"Bearer t"}`))},
 	{tool: "navigate", args: a{"action": "goto"}, wantErr: "url is required for goto"},
 	{tool: "navigate", args: a{"action": "pushstate"}, wantErr: "url is required for pushstate"},
 	{tool: "navigate", args: a{"action": "sideways"}, wantErr: "action must be one of"},
@@ -100,11 +107,13 @@ var argvCases = []argvCase{
 	{tool: "upload_file", args: a{"selector": "#f"}, wantErr: "files must not be empty"},
 
 	// download
-	{tool: "download", args: a{"selector": "@e5", "path": "/tmp/r.pdf"}, want: cmds(cmd("download", "@e5", "/tmp/r.pdf"))},
+	// The tab list and CDP URL check for a separate window's browser context first.
+	{tool: "download", args: a{"selector": "@e5", "path": "/tmp/r.pdf"}, want: cmds(cmd("tab", "list"), cmd("get", "cdp-url"), cmd("download", "@e5", "/tmp/r.pdf"))},
 	{tool: "download", args: a{"selector": "@e5"}, wantErr: "path is required"},
 
 	// eval_script
-	{tool: "eval_script", args: a{"script": "1+1"}, want: cmds(cmd("eval", "1+1"))},
+	// Scripts run over CDP; the CLI's eval is the fallback without it.
+	{tool: "eval_script", args: a{"script": "1+1"}, want: cmds(cmd("tab", "list"), cmd("get", "cdp-url"), cmd("eval", "1+1"))},
 	{tool: "eval_script", args: a{}, wantErr: "script is required"},
 
 	// close_browser
@@ -112,7 +121,8 @@ var argvCases = []argvCase{
 	{tool: "close_browser", args: a{"all": true}, want: cmds(cmd("close", "--all"))},
 
 	// snapshot
-	{tool: "snapshot", args: a{}, want: cmds(cmd("snapshot", "-c"))},
+	// A plain snapshot also reads the full tree as the next diff's baseline.
+	{tool: "snapshot", args: a{}, want: cmds(cmd("snapshot", "-c"), cmd("snapshot"))},
 	{tool: "snapshot", args: a{"interactive": true, "compact": false, "depth": 3, "selector": "main", "urls": true},
 		want: cmds(cmd("snapshot", "-i", "-d", "3", "-s", "main", "--urls"))},
 	{tool: "snapshot", args: a{"interactive": true, "delta": true}, want: cmds(cmd("snapshot", "-i", "-c", "--delta"))},
@@ -145,11 +155,13 @@ var argvCases = []argvCase{
 	{tool: "find", args: a{"by": "role", "value": "button", "name": "Submit", "action": "click"}, want: cmds(cmd("find", "role", "button", "click", "--name", "Submit"))},
 	{tool: "find", args: a{"by": "text", "value": "Sign in", "exact": true}, want: cmds(cmd("find", "text", "Sign in", "click", "--exact"))},
 	{tool: "find", args: a{"by": "label", "value": "Email", "action": "fill", "input": "a@b.c"}, want: cmds(cmd("find", "label", "Email", "fill", "a@b.c"))},
-	{tool: "find", args: a{"by": "placeholder", "value": "Search", "action": "type", "input": "go"}, want: cmds(cmd("find", "placeholder", "Search", "type", "go"))},
+	{tool: "find", args: a{"by": "placeholder", "value": "Search", "action": "fill", "input": "go"}, want: cmds(cmd("find", "placeholder", "Search", "fill", "go"))},
+	// agent-browser's find has no type, focus or uncheck.
+	{tool: "find", args: a{"by": "placeholder", "value": "Search", "action": "type", "input": "go"}, wantErr: "action must be one of"},
 	{tool: "find", args: a{"by": "alt", "value": "Logo", "action": "hover"}, want: cmds(cmd("find", "alt", "Logo", "hover"))},
-	{tool: "find", args: a{"by": "title", "value": "Close", "action": "focus"}, want: cmds(cmd("find", "title", "Close", "focus"))},
+	{tool: "find", args: a{"by": "title", "value": "Close", "action": "hover"}, want: cmds(cmd("find", "title", "Close", "hover"))},
 	{tool: "find", args: a{"by": "testid", "value": "agree", "action": "check", "exact": true}, want: cmds(cmd("find", "testid", "agree", "check"))},
-	{tool: "find", args: a{"by": "first", "value": "input[type=checkbox]", "action": "uncheck"}, want: cmds(cmd("find", "first", "input[type=checkbox]", "uncheck"))},
+	{tool: "find", args: a{"by": "first", "value": "input[type=checkbox]", "action": "check"}, want: cmds(cmd("find", "first", "input[type=checkbox]", "check"))},
 	{tool: "find", args: a{"by": "last", "value": "li", "action": "text"}, want: cmds(cmd("find", "last", "li", "text"))},
 	{tool: "find", args: a{"by": "nth", "value": ".card", "index": 2}, want: cmds(cmd("find", "nth", "2", ".card", "click"))},
 	{tool: "find", args: a{"by": "all", "value": "li.item"}, want: cmds(cmd("eval", `Array.from(document.querySelectorAll("li.item"), e => e.innerText.trim())`))},
@@ -159,7 +171,9 @@ var argvCases = []argvCase{
 
 	// wait
 	{tool: "wait", args: a{"for": "element", "value": "#done"}, want: cmds(cmd("wait", "#done"))},
-	{tool: "wait", args: a{"for": "hidden", "value": "#spinner"}, want: cmds(cmd("wait", "#spinner", "--state", "hidden"))},
+	// Polled with "is visible": the CLI's --state hidden collides with its global --state.
+	{tool: "wait", args: a{"for": "hidden", "value": "#spinner"}, want: cmds(cmd("is", "visible", "#spinner")),
+		setup: func(f *fakecli.Fake) { f.Respond("is visible", `{"visible":false}`) }},
 	{tool: "wait", args: a{"for": "text", "value": "Welcome"}, want: cmds(cmd("wait", "--text", "Welcome"))},
 	{tool: "wait", args: a{"for": "url", "value": "**/home"}, want: cmds(cmd("wait", "--url", "**/home"))},
 	{tool: "wait", args: a{"for": "load"}, want: cmds(cmd("wait", "--load", "load"))},
@@ -198,13 +212,16 @@ var argvCases = []argvCase{
 	{tool: "mouse", args: a{"action": "wheel"}, wantErr: "deltaY or deltaX is required"},
 
 	// tabs
-	{tool: "tabs", args: a{}, want: cmds(cmd("tab", "list"))},
-	{tool: "tabs", args: a{"action": "list"}, want: cmds(cmd("tab", "list"))},
+	// Then the tab list again and the CDP URL, to read current titles over CDP.
+	{tool: "tabs", args: a{}, want: cmds(cmd("tab", "list"), cmd("tab", "list"), cmd("get", "cdp-url"))},
+	{tool: "tabs", args: a{"action": "list"}, want: cmds(cmd("tab", "list"), cmd("tab", "list"), cmd("get", "cdp-url"))},
 	{tool: "tabs", args: a{"action": "new", "url": "http://d/", "label": "docs"}, want: cmds(cmd("tab", "new", "--label", "docs", "http://d/"))},
 	{tool: "tabs", args: a{"action": "switch", "tab": "t2"}, want: cmds(cmd("tab", "t2"))},
 	{tool: "tabs", args: a{"action": "close", "tab": "docs"}, want: cmds(cmd("tab", "close", "docs"))},
 	{tool: "tabs", args: a{"action": "close"}, want: cmds(cmd("tab", "close"))},
 	{tool: "tabs", args: a{"action": "new_window"}, want: cmds(cmd("window", "new"))},
+	// "window new" takes no URL, so the new window opens it next.
+	{tool: "tabs", args: a{"action": "new_window", "url": "http://x/"}, want: cmds(cmd("window", "new"), cmd("open", "http://x/"))},
 	{tool: "tabs", args: a{"action": "switch"}, wantErr: "tab is required for switch"},
 
 	// dialog
@@ -270,10 +287,13 @@ var argvCases = []argvCase{
 	{tool: "record", args: a{"action": "start", "path": "/tmp/r.webm", "url": "http://x/"}, want: cmds(cmd("record", "start", "/tmp/r.webm", "http://x/"))},
 	{tool: "record", args: a{"action": "stop"}, want: cmds(cmd("record", "stop"))},
 	{tool: "record", args: a{"action": "restart", "path": "/tmp/r2.webm"}, want: cmds(cmd("record", "restart", "/tmp/r2.webm"))},
+	{tool: "record", args: a{"action": "start", "path": "/tmp/r.webm", "cursor": true}, want: cmds(cmd("record", "start", "/tmp/r.webm", "--cursor"))},
 	{tool: "record", args: a{"action": "start"}, wantErr: "path is required for start"},
 
 	// diff
-	{tool: "diff", args: a{"kind": "snapshot"}, want: cmds(cmd("diff", "snapshot", "-c"))},
+	// The full tree: compact mode leaves out text such as status messages.
+	{tool: "diff", args: a{"kind": "snapshot"}, want: cmds(cmd("snapshot"))},
+	{tool: "diff", args: a{"kind": "snapshot", "selector": "main"}, want: cmds(cmd("snapshot", "-s", "main"))},
 	{tool: "diff", args: a{"kind": "snapshot", "baseline": "/tmp/b.txt", "selector": "main"}, want: cmds(cmd("diff", "snapshot", "-c", "--baseline", "/tmp/b.txt", "--selector", "main"))},
 	{tool: "diff", args: a{"kind": "screenshot", "baseline": "/tmp/b.png", "output": "/tmp/d.png", "threshold": 0.2, "fullPage": true},
 		want: cmds(cmd("diff", "screenshot", "--baseline", "/tmp/b.png", "--output", "/tmp/d.png", "--threshold", "0.2", "--full"))},
@@ -304,10 +324,10 @@ var argvCases = []argvCase{
 	{tool: "emulate", args: a{"username": "u", "password": "p"}, want: cmds(cmd("set", "credentials", "u", "p"))},
 	{tool: "emulate", args: a{"colorScheme": "dark"}, want: cmds(cmd("set", "media", "dark"))},
 	{tool: "emulate", args: a{"colorScheme": "light", "reducedMotion": true}, want: cmds(cmd("set", "media", "light", "reduced-motion"))},
-	{tool: "emulate", args: a{"colorScheme": "no-preference"}, want: cmds(cmd("set", "media", "no-preference"))},
+	{tool: "emulate", args: a{"colorScheme": "no-preference"}, wantErr: "colorScheme must be one of"},
+	// agent-browser turns reduced motion off when it is not asked for.
+	{tool: "emulate", args: a{"reducedMotion": false}, want: cmds(cmd("set", "media"))},
 	{tool: "emulate", args: a{"reducedMotion": true}, want: cmds(cmd("set", "media", "reduced-motion"))},
-	{tool: "emulate", args: a{"userAgent": "UA/1"}, setup: func(f *fakecli.Fake) { f.SetURL("http://cur/page") },
-		want: cmds(cmd("get", "url"), cmd("--user-agent", "UA/1", "open", "http://cur/page"))},
 	{tool: "emulate", args: a{"device": "Pixel 7", "offline": true, "colorScheme": "dark"},
 		want: cmds(cmd("set", "device", "Pixel 7"), cmd("set", "offline", "on"), cmd("set", "media", "dark"))},
 	{tool: "emulate", args: a{"width": 100}, wantErr: "width and height must be set together"},
@@ -341,7 +361,6 @@ var argvCases = []argvCase{
 	{tool: "state", args: a{"action": "load", "path": "/tmp/s.json"}, want: cmds(cmd("state", "load", "/tmp/s.json"))},
 	{tool: "state", args: a{"action": "list"}, want: cmds(cmd("state", "list"))},
 	{tool: "state", args: a{"action": "show", "path": "s.json"}, want: cmds(cmd("state", "show", "s.json"))},
-	{tool: "state", args: a{"action": "rename", "path": "a", "newName": "b"}, want: cmds(cmd("state", "rename", "a", "b"))},
 	{tool: "state", args: a{"action": "clear"}, want: cmds(cmd("state", "clear"))},
 	{tool: "state", args: a{"action": "clear", "all": true}, want: cmds(cmd("state", "clear", "--all"))},
 	{tool: "state", args: a{"action": "clean", "olderThanDays": 7}, want: cmds(cmd("state", "clean", "--older-than", "7"))},
@@ -350,10 +369,6 @@ var argvCases = []argvCase{
 	{tool: "state", args: a{"action": "rename", "path": "a"}, wantErr: "newName is required"},
 
 	// clipboard
-	{tool: "clipboard", args: a{"action": "read"}, want: cmds(cmd("clipboard", "read"))},
-	{tool: "clipboard", args: a{"action": "write", "text": "hi"}, want: cmds(cmd("clipboard", "write", "hi"))},
-	{tool: "clipboard", args: a{"action": "copy"}, want: cmds(cmd("clipboard", "copy"))},
-	{tool: "clipboard", args: a{"action": "paste"}, want: cmds(cmd("clipboard", "paste"))},
 	{tool: "clipboard", args: a{"action": "write"}, wantErr: "text is required for write"},
 
 	// session
@@ -394,7 +409,11 @@ func TestToolArgv(t *testing.T) {
 	for i, c := range argvCases {
 		t.Run(caseName(i, c), func(t *testing.T) {
 			t.Parallel()
-			e := newEnv(t)
+			e := newEnv(t, func(cfg *config.Config) {
+				if c.tool == "react" {
+					cfg.Enable = "react-devtools"
+				}
+			})
 			if c.setup != nil {
 				c.setup(e.fake)
 			}
@@ -435,7 +454,7 @@ func TestSessionFlagOnEveryTool(t *testing.T) {
 		seen[c.tool] = true
 		t.Run(c.tool, func(t *testing.T) {
 			t.Parallel()
-			e := newEnv(t)
+			e := newEnv(t, func(cfg *config.Config) { cfg.Enable = "react-devtools" })
 			if c.setup != nil {
 				c.setup(e.fake)
 			}

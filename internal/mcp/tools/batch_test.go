@@ -17,7 +17,7 @@ func TestBatchRunsStepsInOrder(t *testing.T) {
 	if res.IsError {
 		t.Fatal(res.text())
 	}
-	want := cmds(cmd("open", "http://x/"), visible("#q"), cmd("fill", "#q", "hi"), cmd("press", "Enter"))
+	want := append(loads(cmd("open", "http://x/")), visible("#q"), cmd("fill", "#q", "hi"), cmd("press", "Enter"))
 	if got := e.fake.Commands(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -126,7 +126,7 @@ func TestBatchSnapshotAfterSteps(t *testing.T) {
 		a{"tool": "click", "args": a{"selector": "@e1"}},
 	}})
 	got := e.fake.Commands()
-	if !reflect.DeepEqual(got[len(got)-1], cmd("diff", "snapshot", "-c")) {
+	if !reflect.DeepEqual(got[len(got)-1], cmd("snapshot")) {
 		t.Fatalf("want a trailing snapshot diff, got %q", got)
 	}
 	if !strings.Contains(res.text(), "Changes:") {

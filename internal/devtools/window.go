@@ -189,6 +189,22 @@ func (p *Page) screen(ctx context.Context) screenSpan {
 }
 
 // browserCall sends a browser-level command (not scoped to the page session).
+// TabTitles returns the current title of each of the browser's tabs by
+// target id.
+func (p *Page) TabTitles(ctx context.Context) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	pages, err := p.conn.Pages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	titles := make(map[string]string, len(pages))
+	for _, t := range pages {
+		titles[t.TargetID] = t.Title
+	}
+	return titles, nil
+}
+
 func (p *Page) browserCall(ctx context.Context, method string, params, result any) error {
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()

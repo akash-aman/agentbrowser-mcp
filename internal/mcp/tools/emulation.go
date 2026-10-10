@@ -1,9 +1,11 @@
 package tools
 
 import (
-	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -15,7 +17,7 @@ import (
 
 func (r *Registry) registerEmulation() {
 	r.add(config.ToolsetEmulation, mcp.NewTool("emulate",
-		mcp.WithDescription("Set one or more emulation settings in one call: viewport, device, geolocation, offline, extra headers, HTTP auth, color scheme, reduced motion, user agent, and network/CPU throttling."),
+		mcp.WithDescription("Set one or more emulation settings in one call: viewport, device, geolocation, offline, extra headers, HTTP auth, color scheme, reduced motion, print media, vision deficiencies, locale, timezone, user agent, JavaScript or cache off, an always-focused page, and network/CPU throttling. Use it to check mobile and responsive layouts, dark mode, accessibility, other locales and the page on slow networks or CPUs."),
 		mcp.WithNumber("width", mcp.Description("Viewport width (with height).")),
 		mcp.WithNumber("height", mcp.Description("Viewport height (with width).")),
 		mcp.WithNumber("scale", mcp.Description("Device pixel ratio, e.g. 2.")),
@@ -26,14 +28,22 @@ func (r *Registry) registerEmulation() {
 		mcp.WithString("headers", mcp.Description("Extra HTTP headers as a JSON object string.")),
 		mcp.WithString("username", mcp.Description("HTTP basic auth username (with password).")),
 		mcp.WithString("password", mcp.Description("HTTP basic auth password.")),
-		mcp.WithString("colorScheme", mcp.Enum("dark", "light", "no-preference")),
+		mcp.WithString("colorScheme", mcp.Enum("dark", "light")),
 		mcp.WithBoolean("reducedMotion", mcp.Description("Prefer reduced motion.")),
-		mcp.WithString("userAgent", mcp.Description("User-Agent; reloads the current page to apply it.")),
+		mcp.WithString("userAgent", mcp.Description("User-Agent for this tab, reloaded to apply it; empty restores the default.")),
 		mcp.WithString("networkProfile", mcp.Enum(devtools.NetworkProfileNames()...), mcp.Description("Network throttling preset for the current tab; none removes it.")),
 		mcp.WithNumber("latencyMs", mcp.Description("Custom network latency (overrides the preset).")),
 		mcp.WithNumber("downloadKbps", mcp.Description("Custom download limit in kbps.")),
 		mcp.WithNumber("uploadKbps", mcp.Description("Custom upload limit in kbps.")),
 		mcp.WithNumber("cpuSlowdown", mcp.Description("CPU slowdown factor: 1 none, 4 mid-tier mobile, 6 low-end.")),
+		mcp.WithBoolean("focus", mcp.Description("Keep the page focused, so menus and popups stay open between calls.")),
+		mcp.WithBoolean("javaScript", mcp.Description("false disables JavaScript; reload to see the page without it.")),
+		mcp.WithString("locale", mcp.Description("Locale for Intl, dates and numbers, e.g. de-DE; empty resets.")),
+		mcp.WithString("timezone", mcp.Description("Timezone ID, e.g. Asia/Tokyo; empty resets.")),
+		mcp.WithString("mediaType", mcp.Enum("print", "screen"), mcp.Description("print shows print styles.")),
+		mcp.WithString("visionDeficiency", mcp.Enum(devtools.VisionDeficiencies...)),
+		mcp.WithBoolean("cacheDisabled", mcp.Description("Disable the HTTP cache, as DevTools' Disable cache does.")),
+		mcp.WithBoolean("authenticator", mcp.Description("Add (true) or remove a virtual passkey authenticator that approves WebAuthn requests.")),
 		sessionParam(), mutating(),
 	), r.handleEmulate)
 }
@@ -118,18 +128,51 @@ func (b *argv) credentials() []string {
 	return []string{"set", "credentials", b.required("username"), b.required("password")}
 }
 
+// media sets the color scheme and reduced motion. agent-browser keeps the
+// scheme when none is given and turns reduced motion off unless it is, so
+// reducedMotion:false alone is "set media". It ignores no-preference.
 func (b *argv) media() []string {
+	if !b.has("colorScheme") && !b.has("reducedMotion") {
+		return nil
+	}
 	step := []string{"set", "media"}
 	if scheme := b.str("colorScheme"); scheme != "" {
-		step = append(step, b.enum("colorScheme", "", "dark", "light", "no-preference"))
+		step = append(step, b.enum("colorScheme", "", "dark", "light"))
 	}
 	if b.boolean("reducedMotion") {
 		step = append(step, "reduced-motion")
 	}
-	if len(step) == 2 {
-		return nil
-	}
 	return step
+}
+
+// stepLabel says what a set step changed where agent-browser only answers
+// "set: true".
+func stepLabel(args []string) string {
+	switch args[1] {
+	case "media":
+		parts := []string{}
+		motion := "reduced motion off"
+		for _, a := range args[2:] {
+			if a == "reduced-motion" {
+				motion = "reduced motion on"
+			} else {
+				parts = append(parts, "color scheme "+a)
+			}
+		}
+		return "media: " + strings.Join(append(parts, motion), ", ")
+	case "credentials":
+		return "credentials: HTTP basic auth as " + args[2] + " for this session's requests"
+	case "headers":
+		var h map[string]any
+		if json.Unmarshal([]byte(args[2]), &h) != nil {
+			return ""
+		}
+		if len(h) == 0 {
+			return "headers: cleared"
+		}
+		return "headers: " + strings.Join(slices.Sorted(maps.Keys(h)), ", ") + " sent with every request"
+	}
+	return ""
 }
 
 func (r *Registry) handleEmulate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -141,8 +184,12 @@ func (r *Registry) handleEmulate(ctx context.Context, req mcp.CallToolRequest) (
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	ua := req.GetString("userAgent", "")
-	if len(steps) == 0 && ua == "" && throttle == nil {
+	overrides, err := emulationArgs(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	_, authenticator := req.GetArguments()["authenticator"]
+	if len(steps) == 0 && throttle == nil && overrides == nil && !authenticator {
 		return mcp.NewToolResultError("set at least one emulation setting"), nil
 	}
 
@@ -152,14 +199,13 @@ func (r *Registry) handleEmulate(ctx context.Context, req mcp.CallToolRequest) (
 		if res.IsError {
 			return res, nil
 		}
-		lines = append(lines, args[1]+": "+resultText(res))
-	}
-	if ua != "" {
-		res := r.applyUserAgent(ctx, req, ua)
-		if res.IsError {
-			return res, nil
+		text := strings.ReplaceAll(resultText(res), "\n", ", ")
+		if label := stepLabel(args); label != "" && text == "set: true" {
+			text = label
+		} else if !strings.HasPrefix(text, args[1]) {
+			text = args[1] + ": " + text
 		}
-		lines = append(lines, "userAgent: "+resultText(res))
+		lines = append(lines, text)
 	}
 	if throttle != nil {
 		text, err := r.applyThrottle(ctx, req, *throttle)
@@ -168,7 +214,70 @@ func (r *Registry) handleEmulate(ctx context.Context, req mcp.CallToolRequest) (
 		}
 		lines = append(lines, text)
 	}
+	if authenticator {
+		page, err := r.livePage(ctx, req)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		text, err := page.SetAuthenticator(ctx, req.GetBool("authenticator", false))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		lines = append(lines, text)
+	}
+	if overrides != nil {
+		page, err := r.livePage(ctx, req)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		text, err := page.SetEmulation(ctx, *overrides)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		lines = append(lines, text)
+		if overrides.UserAgent != nil {
+			// A new User-Agent only reaches the server and page scripts on the next load.
+			lines = append(lines, "reloaded: "+resultText(r.run(ctx, req, "reload")))
+		}
+	}
 	return mcp.NewToolResultText(strings.Join(lines, "\n")), nil
+}
+
+// emulationArgs reads the overrides set over CDP; nil means none were given.
+func emulationArgs(req mcp.CallToolRequest) (*devtools.Emulation, error) {
+	b := newArgv(req)
+	given := false
+	flag := func(key string) *bool {
+		if !b.has(key) {
+			return nil
+		}
+		given = true
+		v := b.boolean(key)
+		return &v
+	}
+	text := func(key string, allowed ...string) *string {
+		if !b.has(key) {
+			return nil
+		}
+		given = true
+		v := b.str(key)
+		if len(allowed) > 0 {
+			v = b.enum(key, "", allowed...)
+		}
+		return &v
+	}
+	e := devtools.Emulation{
+		Focus: flag("focus"), JavaScript: flag("javaScript"), CacheDisabled: flag("cacheDisabled"),
+		Locale: text("locale"), Timezone: text("timezone"), UserAgent: text("userAgent"),
+		MediaType: text("mediaType", "print", "screen"), VisionDeficiency: text("visionDeficiency", devtools.VisionDeficiencies...),
+	}
+	if _, err := b.done(); err != nil {
+		return nil, err
+	}
+	if !given {
+		return nil, nil
+	}
+	return &e, nil
 }
 
 // throttleRequest is the throttling asked for in one emulate call.
@@ -220,18 +329,4 @@ func (r *Registry) applyThrottle(ctx context.Context, req mcp.CallToolRequest, t
 		}
 	}
 	return "throttling: " + page.Throttle().String(), nil
-}
-
-// applyUserAgent reopens the current page with the new User-Agent, because the
-// CLI only applies --user-agent when opening a page.
-func (r *Registry) applyUserAgent(ctx context.Context, req mcp.CallToolRequest, ua string) *mcp.CallToolResult {
-	url := "about:blank"
-	if cur, err := r.mgr.Run(ctx, getSession(req), "get", "url"); err == nil {
-		url = cmp.Or(dataField(cur.Data, "url"), url)
-	}
-	res := r.run(ctx, req, "--user-agent", ua, "open", url)
-	if res.IsError {
-		return res
-	}
-	return mcp.NewToolResultText("applied, reloaded " + url)
 }

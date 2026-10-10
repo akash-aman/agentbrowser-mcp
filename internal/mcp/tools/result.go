@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -37,6 +38,12 @@ func formatData(data json.RawMessage) string {
 		if json.Unmarshal(data, &s) == nil {
 			return s
 		}
+		var list []map[string]any
+		if json.Unmarshal(data, &list) == nil {
+			if text, ok := formatList(list); ok {
+				return text
+			}
+		}
 		return string(data)
 	}
 	note := relaunchNote(obj["lifecycle"])
@@ -48,6 +55,27 @@ func formatData(data json.RawMessage) string {
 		}
 	}
 	return note + formatObject(obj)
+}
+
+// restartNote explains a browser that closed between two calls.
+func restartNote(idle time.Duration) string {
+	why := "e.g. idle or closed by hand"
+	if idle > 0 {
+		why = "browsers close after " + shortDuration(idle) + " without commands"
+	}
+	return "Note: this session's browser had closed since its last use (" + why + "), so this call started a fresh one; earlier tabs, page state and @refs are gone."
+}
+
+// shortDuration drops the zero units time.Duration prints: 15m, not 15m0s.
+func shortDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 // relaunchNote warns when the CLI had to relaunch the browser for this
@@ -69,10 +97,24 @@ func formatObject(obj map[string]any) string {
 	if len(obj) == 0 {
 		return "ok"
 	}
+	if text, ok := formatKnown(obj); ok {
+		return text
+	}
 	if len(obj) == 1 {
 		for k, v := range obj {
 			if slices.Contains(contentKeys, k) {
 				return scalarText(v)
+			}
+		}
+	}
+	if len(obj) == 1 {
+		for k, v := range obj {
+			if list, ok := v.([]any); ok && !slices.ContainsFunc(list, func(x any) bool { _, nested := x.(map[string]any); return nested }) {
+				parts := make([]string, len(list))
+				for i, x := range list {
+					parts[i] = scalarText(x)
+				}
+				return k + ": " + strings.Join(parts, ", ")
 			}
 		}
 	}
@@ -89,6 +131,180 @@ func formatObject(obj map[string]any) string {
 		return strings.Join(lines, "\n")
 	}
 	return compactJSON(obj)
+}
+
+// formatKnown renders CLI results that read badly as JSON: cookies, a
+// storage area and the saved state files.
+func formatKnown(obj map[string]any) (string, bool) {
+	if cookies, ok := obj["cookies"].([]any); ok && len(obj) == 1 {
+		return formatCookies(cookies), true
+	}
+	if data, ok := obj["data"].(map[string]any); ok && len(obj) == 1 {
+		if len(data) == 0 {
+			return "(empty)", true
+		}
+		keys := slices.Sorted(maps.Keys(data))
+		lines := make([]string, len(keys))
+		for i, k := range keys {
+			lines[i] = k + ": " + shortText(scalarText(data[k]), 200)
+		}
+		return strings.Join(lines, "\n"), true
+	}
+	if profiles, ok := obj["profiles"].([]any); ok && len(obj) == 1 && len(profiles) == 0 {
+		return "no saved logins; save one in a terminal with agent-browser auth save <name>", true
+	}
+	if st, ok := obj["state"].(map[string]any); ok && obj["filename"] != nil {
+		return formatState(obj, st), true
+	}
+	if dir, ok := obj["directory"].(string); ok && len(obj) == 2 {
+		files, ok := obj["files"].([]any)
+		if !ok {
+			return "", false
+		}
+		if len(files) == 0 {
+			return "no saved states in " + dir, true
+		}
+		lines := []string{fmt.Sprintf("%s in %s:", plural(len(files), "saved state"), dir)}
+		for _, f := range files {
+			m, ok := f.(map[string]any)
+			if !ok {
+				lines = append(lines, "  "+scalarText(f))
+				continue
+			}
+			line := "  " + scalarText(m["filename"])
+			if size, ok := m["size"].(float64); ok {
+				line += fmt.Sprintf("  %d B", int(size))
+			}
+			if mod, ok := m["modified"].(float64); ok {
+				line += ", saved " + time.Unix(int64(mod), 0).UTC().Format("2006-01-02 15:04 UTC")
+			}
+			if m["encrypted"] == true {
+				line += ", encrypted"
+			}
+			lines = append(lines, line)
+		}
+		return strings.Join(lines, "\n"), true
+	}
+	return "", false
+}
+
+// formatState summarizes a saved state file: its cookies and, per origin,
+// the storage keys it restores.
+func formatState(obj, st map[string]any) string {
+	head := scalarText(obj["path"])
+	if size, ok := obj["size"].(float64); ok {
+		head += fmt.Sprintf(" (%d B", int(size))
+		if mod, ok := obj["modified"].(float64); ok {
+			head += ", saved " + time.Unix(int64(mod), 0).UTC().Format("2006-01-02 15:04 UTC")
+		}
+		if obj["encrypted"] == true {
+			head += ", encrypted"
+		}
+		head += ")"
+	}
+	lines := []string{head}
+	if cookies, ok := st["cookies"].([]any); ok {
+		lines = append(lines, formatCookies(cookies))
+	}
+	origins, _ := st["origins"].([]any)
+	for _, o := range origins {
+		m, ok := o.(map[string]any)
+		if !ok {
+			continue
+		}
+		line := scalarText(m["origin"]) + ":"
+		for _, area := range []string{"localStorage", "sessionStorage"} {
+			items, _ := m[area].([]any)
+			names := make([]string, 0, len(items))
+			for _, it := range items {
+				if kv, ok := it.(map[string]any); ok {
+					names = append(names, scalarText(kv["name"]))
+				}
+			}
+			if len(names) == 0 {
+				names = []string{"(empty)"}
+			}
+			line += " " + area + " " + strings.Join(names, ", ") + ";"
+		}
+		lines = append(lines, strings.TrimSuffix(line, ";"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// formatList renders the CLI's bare lists: bundled skills and Chrome
+// profiles.
+func formatList(list []map[string]any) (string, bool) {
+	has := func(keys ...string) bool {
+		for _, m := range list {
+			for _, k := range keys {
+				if _, ok := m[k].(string); !ok {
+					return false
+				}
+			}
+		}
+		return len(list) > 0
+	}
+	var lines []string
+	switch {
+	case has("name", "content"): // one loaded skill: the guide itself
+		var parts []string
+		for _, m := range list {
+			parts = append(parts, m["content"].(string))
+		}
+		return strings.Join(parts, "\n\n"), true
+	case has("name", "description"):
+		lines = append(lines, plural(len(list), "skill")+" (help topic:\"skills\" name:<name> loads one):")
+		for _, m := range list {
+			desc, _, _ := strings.Cut(m["description"].(string), ". ")
+			lines = append(lines, "- "+m["name"].(string)+": "+shortText(strings.TrimSuffix(desc, "."), 160))
+		}
+	case has("name", "directory"):
+		lines = append(lines, plural(len(list), "Chrome profile")+" (directory, name):")
+		for _, m := range list {
+			lines = append(lines, "  "+m["directory"].(string)+"  "+m["name"].(string))
+		}
+	default:
+		return "", false
+	}
+	return strings.Join(lines, "\n"), true
+}
+
+// formatCookies writes one cookie per line: name=value, where it applies,
+// then its flags.
+func formatCookies(cookies []any) string {
+	if len(cookies) == 0 {
+		return "no cookies"
+	}
+	lines := []string{plural(len(cookies), "cookie") + ":"}
+	for _, c := range cookies {
+		m, ok := c.(map[string]any)
+		if !ok {
+			lines = append(lines, "  "+scalarText(c))
+			continue
+		}
+		str := func(k string) string { s, _ := m[k].(string); return s }
+		flags := []string{"session"}
+		if exp, _ := m["expires"].(float64); exp > 0 && m["session"] != true {
+			flags[0] = "expires " + time.Unix(int64(exp), 0).UTC().Format("2006-01-02 15:04 UTC")
+		}
+		for _, f := range []string{"httpOnly", "secure"} {
+			if m[f] == true {
+				flags = append(flags, strings.ToUpper(f[:1])+f[1:])
+			}
+		}
+		if ss := str("sameSite"); ss != "" {
+			flags = append(flags, "SameSite="+ss)
+		}
+		lines = append(lines, fmt.Sprintf("  %s=%s  %s%s  %s", str("name"), shortText(str("value"), 80), str("domain"), str("path"), strings.Join(flags, ", ")))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func shortText(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }
 
 // isFlat reports whether every value is a scalar, so key: value lines read well.

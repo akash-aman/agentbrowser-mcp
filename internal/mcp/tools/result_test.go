@@ -97,6 +97,12 @@ func TestConsoleFormatting(t *testing.T) {
 	}
 	if got := e.call("console", a{"kind": "errors"}).text(); got != "1 of 1 errors\nError: boom (http://fake/app.js:3:7)" {
 		t.Fatalf("got %q", got)
+	} // An anchored pattern matches the message after its [level].
+	if got := e.call("console", a{"pattern": "^slow"}).text(); got != "1 of 3 log (1 matched pattern)\n[warning] slow api" {
+		t.Fatalf("anchored: %q", got)
+	}
+	if got := e.call("console", a{"pattern": "^nothing"}).text(); got != "0 of 3 log (0 matched pattern)" {
+		t.Fatalf("no match: %q", got)
 	}
 }
 

@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/mark3labs/mcp-go/server"
 
@@ -28,10 +31,23 @@ func main() {
 	s, shutdown := mcpsrv.NewServer(version, cfg, mgr)
 
 	fmt.Fprintf(os.Stderr, "agent-browser-mcp %s: listening on stdio; %s\n", version, mgr.CheckVersion(context.Background()))
+	stop := sync.OnceFunc(func() { shutdown(context.Background()) })
+	// A client stops a stdio server with SIGINT, then SIGTERM and SIGKILL
+	// within half a second (Claude Code on reconnect). ServeStdio first waits
+	// for the calls in flight, which can take seconds (a click on a paused
+	// page, a slow CLI command), so the server was killed before it released
+	// its CDP connections. Exit as soon as they are released instead.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		stop()
+		os.Exit(0)
+	}()
 	// ServeStdio returns when stdin closes or on SIGINT/SIGTERM, which it
-	// traps itself (as context.Canceled); both are a normal stop.
+	// traps too (as context.Canceled); both are a normal stop.
 	err = server.ServeStdio(s)
-	shutdown(context.Background())
+	stop()
 	if err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "agent-browser-mcp: server error:", err)
 		os.Exit(1)

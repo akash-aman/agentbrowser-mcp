@@ -14,7 +14,7 @@ import (
 
 func (r *Registry) registerConsole() {
 	r.add(config.ToolsetCore, mcp.NewTool("console",
-		mcp.WithDescription("Console messages (kind=log), uncaught page errors (errors), or DevTools Issues such as CORS, mixed content, cookie and deprecation problems (issues), newest last. Filter with pattern and limit instead of reading everything."),
+		mcp.WithDescription("Console messages (kind=log), uncaught page errors (errors), or DevTools Issues such as CORS, mixed content, cookie and deprecation problems (issues), newest last. Check errors and issues first when something is broken, blank or not loading; filter with pattern and limit instead of reading everything."),
 		mcp.WithString("kind", mcp.Enum("log", "errors", "issues"), mcp.Description("Default log.")),
 		mcp.WithString("pattern", mcp.Description("Case-insensitive regex; only matching messages are returned.")),
 		mcp.WithNumber("limit", mcp.Description("Return at most the last N messages. Default 50.")),
@@ -140,6 +140,9 @@ func (f lineFilter) apply(lines []string) string {
 	if f.pattern != nil {
 		header += fmt.Sprintf(" (%d matched pattern)", len(matched))
 	}
+	if len(shown) == 0 {
+		return header
+	}
 	return header + "\n" + strings.Join(shown, "\n")
 }
 
@@ -149,7 +152,15 @@ func (f lineFilter) match(lines []string) []string {
 	}
 	var kept []string
 	for _, l := range lines {
-		if f.pattern.MatchString(l) {
+		// "[log] price 5": ^price should match the message, and \[error\]
+		// the level.
+		message := l
+		if strings.HasPrefix(l, "[") {
+			if _, rest, ok := strings.Cut(l, "] "); ok {
+				message = rest
+			}
+		}
+		if f.pattern.MatchString(l) || f.pattern.MatchString(message) {
 			kept = append(kept, l)
 		}
 	}

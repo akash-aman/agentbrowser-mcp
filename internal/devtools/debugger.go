@@ -15,16 +15,22 @@ import (
 // ErrNotPaused is returned by operations that need a paused page.
 var ErrNotPaused = errors.New("the page is not paused; set a breakpoint and trigger it, or pause first")
 
-// Location is a 1-based position in a script.
+// Location is a 1-based position in a script. Original, when set, is the
+// same place in the file the author wrote, from the script's source map.
 type Location struct {
 	URL      string
 	ScriptID string
 	Line     int
 	Column   int
+	Original string
 }
 
 func (l Location) String() string {
-	return fmt.Sprintf("%s:%d:%d", l.URL, l.Line, l.Column)
+	s := fmt.Sprintf("%s:%d:%d", l.URL, l.Line, l.Column)
+	if l.Original != "" {
+		s += " → " + l.Original
+	}
+	return s
 }
 
 // cdpLocation is CDP's 0-based location.
@@ -66,6 +72,13 @@ type Pause struct {
 	HitBreakpoints []string
 	Frames         []Frame
 	Data           *RemoteObject
+	Async          []AsyncTrace // what scheduled this code: await, setTimeout, a promise…
+}
+
+// AsyncTrace is one async segment of a paused stack, newest first.
+type AsyncTrace struct {
+	Description string
+	Frames      []Frame
 }
 
 type debuggerState struct {
@@ -77,6 +90,30 @@ type debuggerState struct {
 	exceptions  string
 	watches     []string
 	unsubscribe []func()
+	mapURLs     map[string]string     // script ID -> absolute source map URL
+	starts      map[string][2]int     // script ID -> 0-based line and column where it starts in its resource, e.g. an inline <script>
+	maps        map[string]*loadedMap // script ID -> source map, loaded on first use
+	blackbox    []string              // patterns stepping skips
+	csp         bool                  // pause on Trusted Types CSP violations
+	// The page's main JavaScript context per frame, and each script's, to
+	// forget a frame's scripts once it loads a new document: a reload left
+	// the old script IDs behind, and "source" read one Chrome had dropped.
+	frameContext  map[string]int
+	scriptContext map[string]int
+}
+
+// forgetContext drops the scripts of a JavaScript context that is gone.
+func (d *debuggerState) forgetContext(id int) {
+	for script, ctx := range d.scriptContext {
+		if ctx != id {
+			continue
+		}
+		delete(d.scriptContext, script)
+		delete(d.scripts, script)
+		delete(d.mapURLs, script)
+		delete(d.starts, script)
+		delete(d.maps, script)
+	}
 }
 
 // DebuggerOn reports whether the debugger is enabled on this page.
@@ -94,19 +131,36 @@ func (p *Page) EnableDebugger(ctx context.Context) error {
 		p.mu.Unlock()
 		return nil
 	}
-	d := &debuggerState{scripts: map[string]Location{}, breakpoints: map[string]*Breakpoint{}, exceptions: "none"}
+	d := &debuggerState{scripts: map[string]Location{}, breakpoints: map[string]*Breakpoint{}, exceptions: "none",
+		mapURLs: map[string]string{}, maps: map[string]*loadedMap{}, starts: map[string][2]int{},
+		frameContext: map[string]int{}, scriptContext: map[string]int{}}
 	p.dbg = d
 	p.mu.Unlock()
 
 	d.unsubscribe = []func(){
 		p.onSession("Debugger.scriptParsed", p.scriptParsed),
-		p.onSession("Debugger.paused", p.pausedEvent),
-		p.onSession("Debugger.resumed", func(json.RawMessage) { p.setPaused(nil) }),
+		p.onSession("Debugger.paused", func(params json.RawMessage) {
+			p.pausedEvent(params)
+			go p.syncPausedBanner()
+		}),
+		p.onSession("Debugger.resumed", func(json.RawMessage) {
+			p.setPaused(nil)
+			go p.syncPausedBanner()
+		}),
+	}
+	// The "Paused in debugger" banner needs the Overlay domain, which needs
+	// DOM. They go first so a page that is already paused gets the banner too,
+	// and a browser without them still gets the debugger.
+	for _, m := range []string{"DOM.enable", "Overlay.enable"} {
+		p.call(ctx, m, nil, nil)
 	}
 	if err := p.call(ctx, "Debugger.enable", map[string]any{"maxScriptsCacheSize": 100_000_000}, nil); err != nil {
 		p.dropDebugger()
 		return err
 	}
+	// Async stacks show what scheduled the paused code (await, timers,
+	// promises), as DevTools does by default.
+	p.call(ctx, "Debugger.setAsyncCallStackDepth", map[string]any{"maxDepth": 32}, nil)
 	p.mu.Lock()
 	d.enabled = true
 	p.mu.Unlock()
@@ -155,17 +209,51 @@ func (p *Page) onSession(method string, fn func(json.RawMessage)) func() {
 
 func (p *Page) scriptParsed(params json.RawMessage) {
 	var e struct {
-		ScriptID string `json:"scriptId"`
-		URL      string `json:"url"`
-		EndLine  int    `json:"endLine"`
+		ScriptID     string `json:"scriptId"`
+		URL          string `json:"url"`
+		StartLine    int    `json:"startLine"`
+		StartColumn  int    `json:"startColumn"`
+		EndLine      int    `json:"endLine"`
+		SourceMapURL string `json:"sourceMapURL"`
+		ContextID    int    `json:"executionContextId"`
+		AuxData      struct {
+			Type      string `json:"type"`
+			FrameID   string `json:"frameId"`
+			IsDefault bool   `json:"isDefault"`
+		} `json:"executionContextAuxData"`
 	}
 	if json.Unmarshal(params, &e) != nil {
 		return
 	}
+	if e.AuxData.Type == "isolated" {
+		// Isolated worlds run extensions' and agent-browser's own scripts
+		// (its Web Vitals input listeners), never the page's. DevTools
+		// ignores them by default; a click event breakpoint stopped in them
+		// before the page's handler. The read loop cannot wait for a reply.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+			defer cancel()
+			p.conn.Call(ctx, p.sessionID, "Debugger.setBlackboxedRanges", map[string]any{
+				"scriptId": e.ScriptID, "positions": []map[string]int{{"lineNumber": 0, "columnNumber": 0}}}, nil)
+		}()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.dbg != nil {
+		if e.AuxData.IsDefault && e.AuxData.FrameID != "" {
+			if old, ok := p.dbg.frameContext[e.AuxData.FrameID]; ok && old != e.ContextID {
+				p.dbg.forgetContext(old)
+			}
+			p.dbg.frameContext[e.AuxData.FrameID] = e.ContextID
+		}
+		p.dbg.scriptContext[e.ScriptID] = e.ContextID
 		p.dbg.scripts[e.ScriptID] = Location{URL: e.URL, ScriptID: e.ScriptID, Line: e.EndLine + 1}
+		if e.StartLine > 0 || e.StartColumn > 0 {
+			p.dbg.starts[e.ScriptID] = [2]int{e.StartLine, e.StartColumn}
+		}
+		if e.SourceMapURL != "" {
+			p.dbg.mapURLs[e.ScriptID] = resolveSource(e.URL, "", e.SourceMapURL)
+		}
 	}
 }
 
@@ -185,6 +273,7 @@ func (p *Page) pausedEvent(params json.RawMessage) {
 				Object RemoteObject `json:"object"`
 			} `json:"scopeChain"`
 		} `json:"callFrames"`
+		AsyncStackTrace *asyncTrace `json:"asyncStackTrace"`
 	}
 	if json.Unmarshal(params, &e) != nil {
 		return
@@ -197,7 +286,28 @@ func (p *Page) pausedEvent(params json.RawMessage) {
 		}
 		pause.Frames = append(pause.Frames, frame)
 	}
+	for t := e.AsyncStackTrace; t != nil && len(pause.Async) < 8; t = t.Parent {
+		seg := AsyncTrace{Description: t.Description}
+		for _, f := range t.CallFrames {
+			seg.Frames = append(seg.Frames, Frame{Function: f.FunctionName,
+				Location: p.location(cdpLocation{ScriptID: f.ScriptID, LineNumber: f.LineNumber, ColumnNumber: f.ColumnNumber}, f.URL)})
+		}
+		pause.Async = append(pause.Async, seg)
+	}
 	p.setPaused(&pause)
+}
+
+// asyncTrace is CDP's Runtime.StackTrace for async parents.
+type asyncTrace struct {
+	Description string `json:"description"`
+	CallFrames  []struct {
+		FunctionName string `json:"functionName"`
+		ScriptID     string `json:"scriptId"`
+		URL          string `json:"url"`
+		LineNumber   int    `json:"lineNumber"`
+		ColumnNumber int    `json:"columnNumber"`
+	} `json:"callFrames"`
+	Parent *asyncTrace `json:"parent"`
 }
 
 // location converts a CDP location to a 1-based one with the script URL.
@@ -226,6 +336,21 @@ func (p *Page) setPaused(pause *Pause) {
 		w <- *pause
 	}
 	p.dbg.waiters = nil
+}
+
+// syncPausedBanner shows Chrome's "Paused in debugger" banner while the page
+// is paused, as DevTools does, so someone watching the browser sees why the
+// page stopped responding. Event handlers run on the connection's read loop
+// and cannot wait for a reply, hence the goroutine; the lock keeps a late
+// show from landing after the clear that followed it.
+func (p *Page) syncPausedBanner() {
+	p.bannerMu.Lock()
+	defer p.bannerMu.Unlock()
+	params := map[string]any{}
+	if p.Paused() != nil {
+		params["message"] = "Paused in debugger"
+	}
+	p.call(context.Background(), "Overlay.setPausedInDebuggerMessage", params, nil)
 }
 
 // Paused returns the current pause, or nil while running.
@@ -291,8 +416,13 @@ func (p *Page) SetBreakpoint(ctx context.Context, spec BreakpointSpec) (Breakpoi
 	if spec.Line < 1 {
 		return Breakpoint{}, fmt.Errorf("line must be >= 1")
 	}
+	where, authored := spec.URL, spec.Line
+	mapped := ""
+	if gen, ok := p.authoredBreakpoint(ctx, spec); ok {
+		mapped = fmt.Sprintf(" (in the bundle at %s:%d:%d)", gen.URL, gen.Line, gen.Column)
+		spec.URL, spec.Line, spec.Column = gen.URL, gen.Line, gen.Column
+	}
 	params := map[string]any{"lineNumber": spec.Line - 1}
-	where := spec.URL
 	if spec.URLRegex != "" {
 		params["urlRegex"], where = spec.URLRegex, "/"+spec.URLRegex+"/"
 	} else {
@@ -316,9 +446,9 @@ func (p *Page) SetBreakpoint(ctx context.Context, spec BreakpointSpec) (Breakpoi
 	if err := p.call(ctx, "Debugger.setBreakpointByUrl", params, &res); err != nil {
 		return Breakpoint{}, err
 	}
-	bp := &Breakpoint{ID: res.BreakpointID, Kind: "line", Where: fmt.Sprintf("%s:%d", where, spec.Line), Condition: condition}
+	bp := &Breakpoint{ID: res.BreakpointID, Kind: "line", Where: fmt.Sprintf("%s:%d%s", where, authored, mapped), Condition: condition}
 	for _, l := range res.Locations {
-		bp.Resolved = append(bp.Resolved, p.location(l, ""))
+		bp.Resolved = append(bp.Resolved, p.withOriginal(ctx, p.location(l, "")))
 	}
 	p.addBreakpoint(bp)
 	return *bp, nil
@@ -391,6 +521,8 @@ func (p *Page) RemoveBreakpoint(ctx context.Context, id string) error {
 		err = p.call(ctx, "DOMDebugger.removeXHRBreakpoint", map[string]any{"url": strings.TrimPrefix(id, "xhr:")}, nil)
 	case "event":
 		err = p.call(ctx, "DOMDebugger.removeEventListenerBreakpoint", map[string]any{"eventName": strings.TrimPrefix(id, "event:")}, nil)
+	case "csp":
+		err = p.call(ctx, "DOMDebugger.setBreakOnCSPViolation", map[string]any{"violationTypes": []string{}}, nil)
 	default:
 		err = p.call(ctx, "Debugger.removeBreakpoint", map[string]any{"breakpointId": id}, nil)
 	}
@@ -418,6 +550,18 @@ func (p *Page) Breakpoints() []Breakpoint {
 	}
 	slices.SortFunc(out, func(a, b Breakpoint) int { return strings.Compare(a.ID, b.ID) })
 	return out
+}
+
+// CanPause reports whether something set on this page can stop it: a
+// breakpoint of any kind, pausing on exceptions or a CSP breakpoint. The
+// debugger being on alone (edit_source turns it on) cannot.
+func (p *Page) CanPause() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dbg == nil || !p.dbg.enabled {
+		return false
+	}
+	return p.dbg.paused != nil || len(p.dbg.breakpoints) > 0 || p.dbg.exceptions != "none" || p.dbg.csp
 }
 
 // ExceptionModes are the pause-on-exception settings.
@@ -473,6 +617,12 @@ func (p *Page) ContinueTo(ctx context.Context, url string, line int) error {
 	if p.Paused() == nil {
 		return ErrNotPaused
 	}
+	// An authored file (src/cart.ts) runs to where that line compiled to,
+	// as a breakpoint on it does.
+	if at, ok := p.authoredBreakpoint(ctx, BreakpointSpec{URL: url, Line: line}); ok {
+		loc := map[string]any{"scriptId": at.ScriptID, "lineNumber": at.Line - 1, "columnNumber": at.Column - 1}
+		return p.call(ctx, "Debugger.continueToLocation", map[string]any{"location": loc}, nil)
+	}
 	script, err := p.scriptByURL(url)
 	if err != nil {
 		return err
@@ -516,8 +666,10 @@ func (p *Page) scriptByURL(url string) (Location, error) {
 // target is a script URL or script ID.
 func (p *Page) Source(ctx context.Context, target string, from, to int) (string, error) {
 	scriptID := target
-	if s, err := p.scriptByURL(target); err == nil {
+	if s, err := p.scriptAt(target, from); err == nil {
 		scriptID = s.ScriptID
+	} else if src, name, ok := p.authoredSource(ctx, target); ok {
+		return name + " (from its source map):\n" + numberLines(src, from, to, 0), nil
 	}
 	var res struct {
 		ScriptSource string `json:"scriptSource"`
@@ -525,7 +677,8 @@ func (p *Page) Source(ctx context.Context, target string, from, to int) (string,
 	if err := p.call(ctx, "Debugger.getScriptSource", map[string]any{"scriptId": scriptID}, &res); err != nil {
 		return "", err
 	}
-	return numberLines(res.ScriptSource, from, to, 0), nil
+	first, _ := p.scriptStart(scriptID)
+	return numberLinesAt(res.ScriptSource, first+1, from, to, 0), nil
 }
 
 func (p *Page) scriptSource(ctx context.Context, scriptID string) (string, error) {
@@ -536,21 +689,61 @@ func (p *Page) scriptSource(ctx context.Context, scriptID string) (string, error
 	return res.ScriptSource, err
 }
 
+// scriptStart is where a script begins in its resource, 0-based: an inline
+// <script> starts partway down its HTML document, and CDP reports positions
+// in the document.
+func (p *Page) scriptStart(scriptID string) (line, column int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dbg == nil {
+		return 0, 0
+	}
+	s := p.dbg.starts[scriptID]
+	return s[0], s[1]
+}
+
+// scriptAt picks the script with this URL that holds 1-based resource line
+// line; an HTML page can have several inline scripts.
+func (p *Page) scriptAt(url string, line int) (Location, error) {
+	var found []Location
+	for _, s := range p.Scripts("") {
+		if s.URL == url {
+			found = append(found, s)
+		}
+	}
+	if len(found) == 0 {
+		return Location{}, fmt.Errorf("no loaded script with URL %s (see debugger scripts)", url)
+	}
+	for _, s := range found {
+		start, _ := p.scriptStart(s.ScriptID)
+		if line > start && line <= s.Line {
+			return s, nil
+		}
+	}
+	return found[0], nil
+}
+
 // minifiedLine is the line length past which a pause shows a window around
 // the column instead of whole lines, since minified bundles are one line.
 const minifiedLine = 200
 
-// sourceContext shows the code around a 1-based line:column: two lines either
-// side for normal code, or 80 characters either side of the column (marked
-// with ▶) for minified code.
-func sourceContext(src string, line, column int) string {
+// sourceContext shows the code around a 1-based resource line:column: two
+// lines either side for normal code, or 80 characters either side of the
+// column (marked with ▶) for minified code. first is the resource line of
+// the script's first line and firstCol its starting column, for inline
+// scripts.
+func sourceContext(src string, line, column, first, firstCol int) string {
 	lines := strings.Split(src, "\n")
-	if line < 1 || line > len(lines) {
+	at := line - first + 1
+	if at < 1 || at > len(lines) {
 		return ""
 	}
-	text := []rune(lines[line-1])
+	text := []rune(lines[at-1])
 	if len(text) <= minifiedLine {
-		return markLine(numberLines(src, line-2, line+2, 0), line)
+		return markLine(numberLinesAt(src, first, line-2, line+2, 0), line)
+	}
+	if at == 1 {
+		column -= firstCol
 	}
 	col := min(max(column-1, 0), len(text))
 	start, end := max(0, col-80), min(len(text), col+80)
@@ -566,10 +759,17 @@ func sourceContext(src string, line, column int) string {
 
 // numberLines renders lines from..to with line numbers, marking mark with ►.
 func numberLines(src string, from, to, mark int) string {
+	return numberLinesAt(src, 1, from, to, mark)
+}
+
+// numberLinesAt is numberLines for a script whose first line is line first
+// of its resource; from, to and mark are resource lines.
+func numberLinesAt(src string, first, from, to, mark int) string {
 	lines := strings.Split(src, "\n")
-	from = max(1, from)
-	if to <= 0 || to > len(lines) {
-		to = len(lines)
+	last := first + len(lines) - 1
+	from = max(first, from)
+	if to <= 0 || to > last {
+		to = last
 	}
 	var b strings.Builder
 	for n := from; n <= to; n++ {
@@ -577,7 +777,7 @@ func numberLines(src string, from, to, mark int) string {
 		if n == mark {
 			prefix = "► "
 		}
-		fmt.Fprintf(&b, "%s%4d  %s\n", prefix, n, shorten(lines[n-1], 200))
+		fmt.Fprintf(&b, "%s%4d  %s\n", prefix, n, shorten(lines[n-first], 200))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -585,26 +785,53 @@ func numberLines(src string, from, to, mark int) string {
 // Describe renders a pause: reason, location, surrounding source, and stack.
 func (p *Page) Describe(ctx context.Context, pause Pause) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Paused (%s)", pause.Reason)
+	reason := pause.Reason
+	if (reason == "other" || reason == "ambiguous") && len(pause.HitBreakpoints) > 0 {
+		reason = "breakpoint"
+	}
+	fmt.Fprintf(&b, "Paused (%s)", reason)
 	if pause.Data != nil && pause.Reason == "exception" {
 		fmt.Fprintf(&b, ": %s", firstLine(pause.Data.Description))
 	}
 	if len(pause.HitBreakpoints) > 0 {
-		fmt.Fprintf(&b, " on %s", strings.Join(pause.HitBreakpoints, ", "))
+		fmt.Fprintf(&b, " on %s", strings.Join(p.hitLabels(pause.HitBreakpoints), ", "))
 	}
 	if len(pause.Frames) == 0 {
 		return b.String()
 	}
 	top := pause.Frames[0]
-	fmt.Fprintf(&b, "\nat %s (%s)\n", functionName(top.Function), top.Location)
-	if src, err := p.scriptSource(ctx, top.Location.ScriptID); err == nil {
-		b.WriteString(sourceContext(src, top.Location.Line, top.Location.Column) + "\n")
+	fmt.Fprintf(&b, "\nat %s (%s)\n", functionName(top.Function), p.withOriginal(ctx, top.Location))
+	if ctxt := p.originalContext(ctx, top.Location); ctxt != "" {
+		b.WriteString(ctxt + "\n")
+	} else if src, err := p.scriptSource(ctx, top.Location.ScriptID); err == nil {
+		line, col := p.scriptStart(top.Location.ScriptID)
+		if ctxt := sourceContext(src, top.Location.Line, top.Location.Column, line+1, col); ctxt != "" {
+			b.WriteString(ctxt + "\n")
+		}
 	}
 	if watch := p.watchText(ctx); watch != "" {
 		b.WriteString(watch + "\n")
 	}
-	b.WriteString(StackText(pause, 8))
+	b.WriteString(p.StackText(ctx, pause, 8))
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// hitLabels names the breakpoints a pause hit by what they watch, keeping
+// the id for remove: Chrome's ids alone ("7:1") say nothing.
+func (p *Page) hitLabels(ids []string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id
+		if p.dbg == nil {
+			continue
+		}
+		if bp, ok := p.dbg.breakpoints[id]; ok && bp.Where != "" {
+			out[i] = bp.Where + " [" + id + "]"
+		}
+	}
+	return out
 }
 
 func markLine(numbered string, line int) string {
@@ -618,16 +845,39 @@ func markLine(numbered string, line int) string {
 	return strings.Join(lines, "\n")
 }
 
-// StackText renders up to max frames as #N function (url:line:col).
-func StackText(pause Pause, max int) string {
+// StackText renders up to max frames as #N function (url:line:col), with
+// original positions from source maps and the async frames that scheduled
+// the code, as DevTools' Call Stack does.
+func (p *Page) StackText(ctx context.Context, pause Pause, max int) string {
 	var b strings.Builder
 	b.WriteString("Stack:")
-	for i, f := range pause.Frames {
-		if i == max {
-			fmt.Fprintf(&b, "\n  … %d more", len(pause.Frames)-max)
-			break
+	n := 0
+	write := func(f Frame) bool {
+		if n == max {
+			return false
 		}
-		fmt.Fprintf(&b, "\n  #%d %s (%s)", i, functionName(f.Function), f.Location)
+		fmt.Fprintf(&b, "\n  #%d %s (%s)", n, functionName(f.Function), p.withOriginal(ctx, f.Location))
+		n++
+		return true
+	}
+	total := len(pause.Frames)
+	for _, seg := range pause.Async {
+		total += len(seg.Frames)
+	}
+	for _, f := range pause.Frames {
+		if !write(f) {
+			fmt.Fprintf(&b, "\n  … %d more", total-n)
+			return b.String()
+		}
+	}
+	for _, seg := range pause.Async {
+		fmt.Fprintf(&b, "\n  -- %s --", functionName(seg.Description))
+		for _, f := range seg.Frames {
+			if !write(f) {
+				fmt.Fprintf(&b, "\n  … %d more", total-n)
+				return b.String()
+			}
+		}
 	}
 	return b.String()
 }
@@ -708,7 +958,12 @@ func (p *Page) Search(ctx context.Context, query, urlFilter string, limit int) (
 		if err := p.call(ctx, "Debugger.getScriptSource", map[string]any{"scriptId": script.ScriptID}, &res); err != nil {
 			continue
 		}
+		line, col := p.scriptStart(script.ScriptID)
 		for _, m := range findAll(res.ScriptSource, query, limit-len(matches)) {
+			if m.Location.Line == 1 {
+				m.Location.Column += col
+			}
+			m.Location.Line += line
 			m.Location.URL, m.Location.ScriptID = script.URL, script.ScriptID
 			matches = append(matches, m)
 		}
@@ -754,7 +1009,7 @@ func (p *Page) Scope(ctx context.Context, frame int) (string, error) {
 		if s.Type == "global" || s.Object.ObjectID == "" {
 			continue
 		}
-		props, err := p.Properties(ctx, s.Object.ObjectID)
+		props, err := p.properties(ctx, s.Object.ObjectID, false)
 		if err != nil {
 			return "", err
 		}
@@ -770,6 +1025,12 @@ func (p *Page) Scope(ctx context.Context, frame int) (string, error) {
 // Properties renders an object's own properties as name = value lines, with
 // object IDs so nested objects can be expanded.
 func (p *Page) Properties(ctx context.Context, objectID string) (string, error) {
+	return p.properties(ctx, objectID, true)
+}
+
+// properties lists an object's own properties and, with getters, the getters
+// it inherits; scope objects have none worth reading.
+func (p *Page) properties(ctx context.Context, objectID string, getters bool) (string, error) {
 	var res struct {
 		Result []struct {
 			Name  string        `json:"name"`
@@ -793,11 +1054,42 @@ func (p *Page) Properties(ctx context.Context, objectID string) (string, error) 
 		}
 		lines = append(lines, line)
 	}
+	// Host objects (WebSocket, elements) and class instances keep their
+	// fields as getters on the prototype; read those too, as expanding an
+	// object in DevTools does.
+	var inherited [][2]string
+	if getters && p.callOn(ctx, objectID, prototypeGettersJS, nil, &inherited) == nil {
+		for _, g := range inherited {
+			lines = append(lines, g[0]+" = "+g[1]+"  (getter)")
+		}
+	}
 	if len(lines) == 0 {
 		return "(empty)", nil
 	}
 	return strings.Join(lines, "\n"), nil
 }
+
+// prototypeGettersJS reads the getters an object inherits, such as a
+// WebSocket's url or onmessage handler, stopping at Object.prototype.
+const prototypeGettersJS = `function() {
+  const out = [], seen = new Set();
+  for (let o = Object.getPrototypeOf(this); o && o !== Object.prototype && out.length < 40; o = Object.getPrototypeOf(o)) {
+    for (const [k, d] of Object.entries(Object.getOwnPropertyDescriptors(o))) {
+      if (seen.has(k) || !d.get || out.length >= 40) continue;
+      seen.add(k);
+      let v;
+      try { v = this[k]; } catch { continue; }
+      let text;
+      if (typeof v === "function") text = "ƒ " + (v.name || "anonymous");
+      else if (v === null || v === undefined) text = String(v);
+      else if (typeof v === "string") text = JSON.stringify(v.length > 120 ? v.slice(0, 117) + "…" : v);
+      else if (typeof v === "object") text = (v.constructor && v.constructor.name) || "Object";
+      else text = String(v);
+      out.push([k, text]);
+    }
+  }
+  return out;
+}`
 
 func indent(s string) string {
 	return "  " + strings.ReplaceAll(s, "\n", "\n  ")
@@ -876,7 +1168,7 @@ func (p *Page) Listeners(ctx context.Context, selector string) ([]Listener, erro
 	out := make([]Listener, 0, len(res.Listeners))
 	for _, l := range res.Listeners {
 		listener := Listener{Type: l.Type, Capture: l.UseCapture, Once: l.Once, Passive: l.Passive,
-			Location: p.location(cdpLocation{ScriptID: l.ScriptID, LineNumber: l.LineNumber, ColumnNumber: l.ColumnNumber}, "")}
+			Location: p.withOriginal(ctx, p.location(cdpLocation{ScriptID: l.ScriptID, LineNumber: l.LineNumber, ColumnNumber: l.ColumnNumber}, ""))}
 		if l.Handler != nil {
 			listener.Handler = l.Handler.String()
 		}
