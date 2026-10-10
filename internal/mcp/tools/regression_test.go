@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecdp"
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecli"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecli"
 )
 
 // One test per bug found in the 1.x server.

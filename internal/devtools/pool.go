@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
-	"github.com/vercel-labs/agent-browser-mcp/internal/cdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/browser"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/cdp"
 )
 
 // Pool holds a CDP connection to the active tab of each browser session.

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecli"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecli"
 )
 
 // argvCase is one tool call and the exact CLI commands it must produce

@@ -12,9 +12,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/cdp"
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
-	"github.com/vercel-labs/agent-browser-mcp/internal/devtools"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/cdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/devtools"
 )
 
 func (r *Registry) registerPerformance() {

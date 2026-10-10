@@ -11,7 +11,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
 )
 
 // maxInlineImage is the largest screenshot returned inline; bigger files are

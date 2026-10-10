@@ -13,9 +13,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
-	mcpsrv "github.com/vercel-labs/agent-browser-mcp/internal/mcp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/browser"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
+	mcpsrv "github.com/xcode-studio/agentbrowser-mcp/internal/mcp"
 )
 
 const version = "2.0.0"

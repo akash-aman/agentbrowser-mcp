@@ -31,7 +31,7 @@ import (
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/cdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/cdp"
 )
 
 const (

@@ -12,8 +12,8 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
-	"github.com/vercel-labs/agent-browser-mcp/internal/devtools"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/devtools"
 )
 
 // registerCore adds navigation and element interaction tools.

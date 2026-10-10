@@ -1,6 +1,8 @@
-module github.com/vercel-labs/agent-browser-mcp
+module github.com/xcode-studio/agentbrowser-mcp
 
 go 1.26.1
+
+toolchain go1.26.9
 
 require (
 	github.com/coder/websocket v1.8.15

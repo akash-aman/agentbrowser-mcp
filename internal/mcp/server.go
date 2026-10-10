@@ -9,9 +9,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
-	"github.com/vercel-labs/agent-browser-mcp/internal/mcp/tools"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/browser"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/mcp/tools"
 )
 
 // NewServer creates a fully-wired MCP server backed by the agent-browser CLI,

@@ -18,7 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/browser"
 )
 
 const devtoolsPage = `<!doctype html><title>Shop</title>

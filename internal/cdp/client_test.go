@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecdp"
 )
 
 func dial(t *testing.T, s *fakecdp.Server) *Conn {
