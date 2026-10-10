@@ -1,12 +1,38 @@
-# agent-browser-mcp
+<div align="center">
 
-**Chrome DevTools for AI agents.** An [MCP](https://modelcontextprotocol.io/) server that lets Claude, or any MCP client, debug, profile and test websites the way a developer does in DevTools, through the [agent-browser](https://github.com/vercel-labs/agent-browser) CLI.
+# 🌐 agent-browser-mcp
+
+**Chrome DevTools for AI agents: debug, profile and test websites the way a developer does in DevTools, via [MCP](https://modelcontextprotocol.io/) tools.**
+
+</div>
+
+<p align="center">
+<a href="https://www.patreon.com/akashaman">
+<img src="https://img.shields.io/badge/Patreon-Support-F96854?style=for-the-badge&logo=patreon" alt="Patreon"/>
+</a>
+<a href="https://www.buymeacoffee.com/akashaman">
+<img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Donate-FFDD00?style=for-the-badge&logo=buy-me-a-coffee" alt="Buy Me A Coffee"/>
+</a>
+<a href="mailto:sir.akashaman@gmail.com">
+<img src="https://img.shields.io/badge/Hire%20Me-Email-blue?style=for-the-badge&logo=gmail" alt="Hire Me"/>
+</a>
+</p>
+
+## Overview
+
+agent-browser-mcp is an [MCP](https://modelcontextprotocol.io/) server that gives Claude, or any MCP client, the Chrome DevTools: a JavaScript debugger, the Elements panel, performance and memory profiling, network capture, device emulation and more. It drives the browser through the [agent-browser](https://github.com/vercel-labs/agent-browser) CLI, so you describe the problem ("checkout fails", "the feed stutters") and the agent investigates it.
+
+Made with ❤️ by [Akash Aman](https://linktr.ee/akash_aman)
+
+---
+
+<br>
 
 ![The model finds a cart bug: navigate reports the page's errors, a breakpoint pauses the click, and scope shows the price is a string](docs/media/debug.gif)
 
 <sub>Scripted calls, real results: [docs/demo](docs/demo) drives this server over stdio against a local demo page.</sub>
 
-## What it can do
+## ✨ What it can do
 
 - **Debug from a symptom.** Line, conditional, function, DOM, XHR, event and CSP breakpoints; stepping; scope and watch; async call stacks; source-mapped original files. A click that hits a breakpoint returns the paused line straight away.
 - **Try a fix without touching your files.** `edit_source` serves an edited script in place of the original and reloads, like DevTools Local Overrides.
@@ -26,7 +52,7 @@
 - **Notice problems unasked.** Every page load reports its uncaught JS errors and failed requests, so the model follows up without being told.
 - **Reach the rest of DevTools.** The `cdp` tool sends any DevTools Protocol command (Layers, Media, WebAudio, and more).
 
-### More demos
+### 🎬 More demos
 
 **"The blog stutters when I scroll, and the page jumps while it loads."** Rendering overlays outline the layout shift, Web Vitals measure it, and a CPU profile names the scroll handler.
 
@@ -36,7 +62,7 @@
 
 ![Phone emulation, Web Vitals, coverage and a Lighthouse audit of the shop](docs/media/performance.gif)
 
-## How it differs from Claude in Chrome
+## 🆚 How it differs from Claude in Chrome
 
 Both let Claude use a browser, but they do different jobs, and they work well side by side.
 
@@ -56,7 +82,7 @@ Both let Claude use a browser, but they do different jobs, and they work well si
 
 Use Claude in Chrome when you want Claude to act in your own browser. Use agent-browser-mcp when the website itself is the work.
 
-## Why it's efficient
+## ⚡ Why it's efficient
 
 - **Small, lazy schema.** 43 tools in about 11.6k tokens. Claude Code loads a tool's schema only when it's first needed.
 - **Text, not pixels.** An accessibility snapshot of a page costs a few hundred tokens. A screenshot is used only when you need to see the page.
@@ -69,7 +95,7 @@ Use Claude in Chrome when you want Claude to act in your own browser. Use agent-
 - **Light on your machine.** The model stays in one browser, and a window left idle for 15 minutes closes itself, so forgotten browsers don't keep the CPU busy and the fans spinning.
 - **Exits cleanly.** On reconnect the server stops at once and releases its browser connections.
 
-## Quick start
+## 🚀 Quick start
 
 1. Install the [agent-browser](https://github.com/vercel-labs/agent-browser) CLI **0.38.0 or newer** and its browser:
 
@@ -110,7 +136,7 @@ Use Claude in Chrome when you want Claude to act in your own browser. Use agent-
 - **`--headed`:** shows the browser window; leave it out to run headless.
 - **Optional:** [Lighthouse](https://github.com/GoogleChrome/lighthouse) (`npm install -g lighthouse`) for audits, and ffmpeg for `record`.
 
-## Tools
+## 🧰 Tools
 
 Every tool takes an optional `session`. Leave it out to use the current browser; a new name opens another browser.
 
@@ -164,7 +190,7 @@ Every tool takes an optional `session`. Leave it out to use the current browser;
 
 </details>
 
-## Configuration
+## ⚙️ Configuration
 
 Every setting can come from an environment variable or a flag; flags win.
 
@@ -225,7 +251,7 @@ Every setting can come from an environment variable or a flag; flags win.
 - **Copy logins once:** `agent-browser --auto-connect state save ~/auth.json`, then start with `--state ~/auth.json`.
 - **Attach:** `--cdp 9222`, `--auto-connect`, or the `session` tool's `connect` action.
 
-## How it works
+## 🔧 How it works
 
 ```
 MCP client ⇄ stdio ⇄ agent-browser-mcp ─┬─ agent-browser CLI (--json) ─ Chrome
@@ -244,7 +270,7 @@ MCP client ⇄ stdio ⇄ agent-browser-mcp ─┬─ agent-browser CLI (--json) 
   - copy and paste that changed nothing
   - a device's user agent that wouldn't reset
 
-## Compatibility
+## 🔗 Compatibility
 
 | agent-browser-mcp | agent-browser CLI | Tested with |
 |---|---|---|
@@ -259,7 +285,7 @@ The server checks `agent-browser --version` at startup and warns if the CLI is o
 
 </details>
 
-## Development
+## 🛠️ Development
 
 ```bash
 go test ./...                                     # fake CLI and fake Chrome, a few seconds
@@ -271,6 +297,22 @@ go build -o agent-browser-mcp . && go run docs/demo/main.go   # re-record the de
 - **Guards:** coverage tests fail if a tool or enum value has no test case. Budget tests keep `tools/list` under 48 KB and the instructions under Claude Code's 2,048-character limit.
 - **Lighthouse:** set `LIGHTHOUSE_PATH=$(which lighthouse)` to include the Lighthouse audit in the integration run.
 
-## License
+## 🤝 Contributing
 
-MIT. See [LICENSE](./LICENSE).
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/akash-aman/agentbrowser-mcp/issues).
+
+## 📝 License
+
+This project is [MIT](./LICENSE) licensed.
+
+---
+
+<div align="center">
+
+[![Patreon](https://img.shields.io/badge/Patreon-Support-F96854?style=for-the-badge&logo=patreon)](https://www.patreon.com/akashaman)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Donate-FFDD00?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/akashaman)
+[![Hire Me](https://img.shields.io/badge/Hire%20Me-Email-blue?style=for-the-badge&logo=gmail)](mailto:sir.akashaman@gmail.com)
+
+### Made with ❤️ by [Akash Aman](https://linktr.ee/akash_aman)
+
+</div>
