@@ -37,6 +37,7 @@ Made with ❤️ by [Akash Aman](https://linktr.ee/akash_aman)
 - **Debug from a symptom.** Line, conditional, function, DOM, XHR, event and CSP breakpoints; stepping; scope and watch; async call stacks; source-mapped original files. A click that hits a breakpoint returns the paused line straight away.
 - **Try a fix without touching your files.** `edit_source` serves an edited script in place of the original and reloads, like DevTools Local Overrides.
 - **Explain why something looks wrong.** The CSS rules that apply and which ones lose, computed values, the box model, the accessibility name and role, and WCAG contrast. It can also force `:hover`, show grid and flex overlays, and make live edits.
+- **See the page.** Screenshots of the viewport, the full page or one element, with clickable elements numbered so the model can act on what it sees. `diff` compares a screenshot with a baseline image to catch visual changes, and `save_pdf` saves the page as a PDF.
 - **Find out why a page is slow.**
   - Web Vitals, rated against Google's thresholds
   - a filmstrip of the load
