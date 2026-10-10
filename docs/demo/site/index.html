@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Acme Mugs</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <strong class="logo">☕ Acme Mugs</strong>
+  <div class="cart" aria-live="polite">Cart · <span id="count">0</span> items · <b id="total">$0.00</b></div>
+</header>
+<main>
+  <h1>Mugs for every desk</h1>
+  <div class="grid">
+    <article class="card">
+      <div class="art" style="--c:#f4a261">☕</div>
+      <h2>Classic mug</h2>
+      <p class="price">$12.50</p>
+      <button data-price="12.50">Add to cart</button>
+    </article>
+    <article class="card">
+      <img class="art" src="img/travel-mug.png" alt="Travel mug">
+      <h2>Travel mug</h2>
+      <p class="price">$18.00</p>
+      <button data-price="18.00">Add to cart</button>
+    </article>
+    <article class="card">
+      <div class="art" style="--c:#2a9d8f">🍵</div>
+      <h2>Espresso cup</h2>
+      <p class="price">$7.25</p>
+      <button data-price="7.25">Add to cart</button>
+    </article>
+  </div>
+</main>
+<script src="vendor.js"></script>
+<script src="shop.js"></script>
+<script src="analytics.js"></script>
+</body>
+</html>
