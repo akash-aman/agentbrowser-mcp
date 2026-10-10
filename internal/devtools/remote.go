@@ -1,6 +1,7 @@
 package devtools
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -76,8 +77,11 @@ func (p ObjectPreview) String(className string) string {
 	parts := make([]string, 0, len(p.Properties)+1)
 	for _, prop := range p.Properties {
 		v := prop.Value
-		if prop.Type == "string" {
+		switch prop.Type {
+		case "string":
 			v = fmt.Sprintf("%q", v)
+		case "function": // previews leave a function's value empty
+			v = cmp.Or(v, "ƒ")
 		}
 		if p.Subtype == "array" {
 			parts = append(parts, v)

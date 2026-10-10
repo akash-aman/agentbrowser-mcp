@@ -39,10 +39,13 @@ func (r *Registry) navigation(fn argvFunc) server.ToolHandlerFunc {
 
 // watchHealth notes the page errors so far and returns a function that,
 // healthSettle after the navigation, describes the errors and failed
-// requests since, or returns "" when there were none. While debugging it does not watch, since
-// a paused page could hold the extra commands.
+// requests since, or returns "" when there were none. It does not watch
+// when a breakpoint or exception pause could stop the load, since a paused
+// page could hold the extra commands. The debugger being on is not enough:
+// edit_source turns it on, and the check stayed off for the whole session.
 func (r *Registry) watchHealth(ctx context.Context, req mcp.CallToolRequest) func(context.Context) string {
-	if page := r.dt.Existing(getSession(req)); page != nil && page.DebuggerOn() {
+	page := r.dt.Existing(getSession(req))
+	if page != nil && page.CanPause() {
 		return func(context.Context) string { return "" }
 	}
 	before, errsKnown := r.pageErrors(ctx, req)
@@ -52,6 +55,9 @@ func (r *Registry) watchHealth(ctx context.Context, req mcp.CallToolRequest) fun
 		case <-ctx.Done():
 			return ""
 		case <-time.After(r.healthSettle):
+		}
+		if page != nil && page.Paused() != nil {
+			return ""
 		}
 		var errs []string
 		if after, ok := r.pageErrors(ctx, req); ok && errsKnown {

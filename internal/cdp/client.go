@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -137,8 +138,9 @@ func (c *Conn) Call(ctx context.Context, sessionID, method string, params, resul
 }
 
 // On subscribes fn to events named method from any session and returns a
-// function that unsubscribes. fn runs on the read loop, so it must not block
-// or make calls on this connection.
+// function that unsubscribes. A method ending in * matches every event with
+// that prefix, e.g. "Network.*". fn runs on the read loop, so it must not
+// block or make calls on this connection.
 func (c *Conn) On(method string, fn func(Event)) (unsubscribe func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -221,7 +223,7 @@ func (c *Conn) dispatch(ev Event) {
 	c.mu.Lock()
 	var fns []func(Event)
 	for _, h := range c.handlers {
-		if h.method == ev.Method {
+		if prefix, wild := strings.CutSuffix(h.method, "*"); h.method == ev.Method || wild && strings.HasPrefix(ev.Method, prefix) {
 			fns = append(fns, h.fn)
 		}
 	}

@@ -149,3 +149,31 @@ func TestPort(t *testing.T) {
 		t.Fatal("URL without port must fail")
 	}
 }
+
+// TestPrefixSubscription: "Network.*" receives every Network event and
+// nothing else.
+func TestPrefixSubscription(t *testing.T) {
+	t.Parallel()
+	s := fakecdp.New(t, "http://fake/")
+	s.Reply("Network.enable", fakecdp.Reply{Events: []fakecdp.Event{
+		{Method: "Network.requestWillBeSent", Params: map[string]any{}},
+		{Method: "Page.loadEventFired", Params: map[string]any{}},
+		{Method: "Network.loadingFinished", Params: map[string]any{}},
+	}})
+	c := dial(t, s)
+	var mu sync.Mutex
+	var got []string
+	c.On("Network.*", func(ev Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, ev.Method)
+	})
+	if err := c.Call(context.Background(), fakecdp.SessionID, "Network.enable", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 || got[0] != "Network.requestWillBeSent" || got[1] != "Network.loadingFinished" {
+		t.Fatalf("got %q", got)
+	}
+}

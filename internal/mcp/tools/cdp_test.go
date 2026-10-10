@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -9,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecdp"
 )
@@ -69,15 +72,43 @@ func browserFixture(s *fakecdp.Server) {
 	s.Handle("Runtime.evaluate", func(p map[string]any) fakecdp.Reply {
 		expr, _ := p["expression"].(string)
 		switch {
+		case strings.HasPrefix(expr, "await fetch("):
+			return r(a{"result": a{"type": "string", "value": "200 application/json"}})
+		case expr == "Widget.prototype":
+			return r(a{"result": a{"type": "object", "className": "Object", "objectId": "proto-1"}})
+		case strings.Contains(expr, "getAnimations"):
+			return r(a{"result": a{"type": "object", "value": []any{a{"type": "CSSAnimation", "name": "spin", "target": "div.loader", "state": "running", "duration": 1000, "iterations": -1}}}})
+		case expr == "app.save":
+			return r(a{"result": a{"type": "function", "className": "Function", "objectId": "fn-1", "description": "function save() {}"}})
 		case expr == "location.origin":
 			return r(a{"result": a{"type": "string", "value": "http://fake"}})
+		case strings.Contains(expr, "unusedExamples"):
+			return r(a{"result": a{"type": "object", "value": cssOverviewFixture}})
 		case strings.Contains(expr, "querySelector"):
 			return r(a{"result": a{"type": "object", "subtype": "node", "objectId": "node-1", "description": "button"}})
 		case strings.Contains(expr, "serviceWorker"):
 			return r(a{"result": a{"type": "string", "value": "http://fake/ activated http://fake/sw.js"}})
+		case strings.Contains(expr, "elementFromPoint"):
+			return r(a{"result": a{"type": "object", "subtype": "node", "objectId": "node-1", "description": "button"}})
+		case strings.Contains(expr, "activeElement"):
+			return r(a{"result": a{"type": "object", "value": a{"label": "input#email", "editable": true, "selected": true}}})
+		case expr == "navigator.clipboard.readText()":
+			return r(a{"result": a{"type": "string", "value": "copied text"}})
+		case expr == "'hi'":
+			return r(a{"result": a{"type": "string", "value": "hi"}})
+		case expr == "({a: 1})":
+			return r(a{"result": a{"type": "object", "className": "Object", "objectId": "obj-json", "description": "Object"}})
+		case expr == "document.body":
+			return r(a{"result": a{"type": "object", "subtype": "node", "className": "HTMLBodyElement", "objectId": "node-body", "description": "body",
+				"preview": a{"type": "object", "subtype": "node", "properties": []any{a{"name": "text", "type": "string", "value": ""}}}}})
+		case expr == "fetch('/x').then(r => r.status)":
+			return r(a{"result": a{"type": "object", "subtype": "promise", "className": "Promise", "objectId": "promise-1"}})
+		case expr == "boom()":
+			return r(a{"result": a{"type": "object"}, "exceptionDetails": a{"text": "Uncaught", "exception": a{"type": "object", "description": "Error: boom\n    at boom"}}})
 		}
 		return r(a{"result": a{"type": "number", "value": 2, "description": "2"}})
 	})
+	s.Reply("Runtime.awaitPromise", r(a{"result": a{"type": "number", "value": 204, "description": "204"}}))
 	s.Reply("Runtime.getProperties", r(a{"result": []any{
 		a{"name": "total", "value": a{"type": "number", "value": 42, "description": "42"}},
 		a{"name": "cart", "value": a{"type": "object", "className": "Cart", "objectId": "obj-2", "description": "Cart",
@@ -121,6 +152,10 @@ func browserFixture(s *fakecdp.Server) {
 	s.Reply("CacheStorage.requestEntries", r(a{"returnCount": 1, "cacheDataEntries": []any{a{"requestURL": "http://fake/app.js", "requestMethod": "GET", "responseStatus": 200}}}))
 	s.Reply("Page.getAppManifest", r(a{"url": "http://fake/manifest.json", "errors": []any{}, "data": `{"name": "Fake"}`}))
 	s.Reply("Storage.getUsageAndQuota", r(a{"usage": 2048, "quota": 1 << 30, "usageBreakdown": []any{a{"storageType": "indexeddb", "usage": 2048}, a{"storageType": "cookies", "usage": 0}}}))
+	elementsFixture(s)
+	debuggerExtraFixture(s)
+	captureFixture(s)
+	batch4Fixture(s)
 }
 
 // pauseOnEnable makes the page already paused once the debugger turns on.
@@ -185,7 +220,10 @@ func rule(want map[string]any) func(*testing.T, *fakecdp.Server) {
 
 var (
 	byRule     = "Network.emulateNetworkConditionsByRule"
+	dom        = "DOM.enable"
+	overlay    = "Overlay.enable" // for the paused banner
 	enable     = "Debugger.enable"
+	async      = "Debugger.setAsyncCallStackDepth"
 	setBP      = "Debugger.setBreakpointByUrl"
 	priorBP    = []toolCall{{"debugger", a{"action": "breakpoint", "url": "http://fake/app.js", "line": 12}}}
 	priorStart = []toolCall{{"performance", a{"action": "coverage_start"}}}
@@ -193,82 +231,85 @@ var (
 
 var cdpCases = []cdpCase{
 	// debugger: breakpoints
-	{tool: "debugger", args: a{"action": "breakpoint", "url": "http://fake/app.js", "line": 12}, want: []string{enable, setBP},
+	{tool: "debugger", args: a{"action": "breakpoint", "url": "http://fake/app.js", "line": 12}, want: []string{dom, overlay, enable, async, setBP},
 		text: "bp-1: line http://fake/app.js:12 → http://fake/app.js:12:3", check: params(setBP, a{"url": "http://fake/app.js", "lineNumber": 11.0})},
-	{tool: "debugger", args: a{"action": "breakpoint", "urlRegex": `app\.js$`, "line": 5, "column": 3, "condition": "total > 10"}, want: []string{enable, setBP},
+	{tool: "debugger", args: a{"action": "breakpoint", "urlRegex": `app\.js$`, "line": 5, "column": 3, "condition": "total > 10"}, want: []string{dom, overlay, enable, async, setBP},
 		text: "if total > 10", check: params(setBP, a{"urlRegex": `app\.js$`, "lineNumber": 4.0, "columnNumber": 2.0, "condition": "total > 10"})},
-	{tool: "debugger", args: a{"action": "breakpoint", "url": "http://fake/app.js", "line": 12, "logMessage": "'total=', total"}, want: []string{enable, setBP},
+	{tool: "debugger", args: a{"action": "breakpoint", "url": "http://fake/app.js", "line": 12, "logMessage": "'total=', total"}, want: []string{dom, overlay, enable, async, setBP},
 		check: params(setBP, a{"condition": "console.log('total=', total), false"})},
 	{tool: "debugger", args: a{"action": "breakpoint", "url": "http://fake/app.js"}, wantErr: "line is required for breakpoint"},
 	{tool: "debugger", args: a{"action": "breakpoint", "line": 3}, wantErr: "url or urlRegex is required"},
-	{tool: "debugger", args: a{"action": "dom_breakpoint", "selector": "#cart", "change": "subtree-modified"}, want: []string{enable, "DOM.getDocument", "DOM.querySelector", "DOMDebugger.setDOMBreakpoint"},
+	{tool: "debugger", args: a{"action": "dom_breakpoint", "selector": "#cart", "change": "subtree-modified"}, want: []string{dom, overlay, enable, async, "DOM.getDocument", "DOM.querySelector", "DOMDebugger.setDOMBreakpoint"},
 		text: "dom:subtree-modified:#cart", check: params("DOMDebugger.setDOMBreakpoint", a{"nodeId": 5.0, "type": "subtree-modified"})},
-	{tool: "debugger", args: a{"action": "dom_breakpoint", "selector": "#cart", "change": "attribute-modified"}, want: []string{enable, "DOM.getDocument", "DOM.querySelector", "DOMDebugger.setDOMBreakpoint"}},
-	{tool: "debugger", args: a{"action": "dom_breakpoint", "selector": "#cart", "change": "node-removed"}, want: []string{enable, "DOM.getDocument", "DOM.querySelector", "DOMDebugger.setDOMBreakpoint"}},
+	{tool: "debugger", args: a{"action": "dom_breakpoint", "selector": "#cart", "change": "attribute-modified"}, want: []string{dom, overlay, enable, async, "DOM.getDocument", "DOM.querySelector", "DOMDebugger.setDOMBreakpoint"}},
+	{tool: "debugger", args: a{"action": "dom_breakpoint", "selector": "#cart", "change": "node-removed"}, want: []string{dom, overlay, enable, async, "DOM.getDocument", "DOM.querySelector", "DOMDebugger.setDOMBreakpoint"}},
 	{tool: "debugger", args: a{"action": "dom_breakpoint"}, wantErr: "selector is required for dom_breakpoint"},
-	{tool: "debugger", args: a{"action": "xhr_breakpoint", "urlContains": "/api"}, want: []string{enable, "DOMDebugger.setXHRBreakpoint"},
+	{tool: "debugger", args: a{"action": "xhr_breakpoint", "urlContains": "/api"}, want: []string{dom, overlay, enable, async, "DOMDebugger.setXHRBreakpoint"},
 		text: `request URL contains "/api"`, check: params("DOMDebugger.setXHRBreakpoint", a{"url": "/api"})},
-	{tool: "debugger", args: a{"action": "event_breakpoint", "event": "click"}, want: []string{enable, "DOMDebugger.setEventListenerBreakpoint"},
+	{tool: "debugger", args: a{"action": "event_breakpoint", "event": "click"}, want: []string{dom, overlay, enable, async, "DOMDebugger.setEventListenerBreakpoint"},
 		text: "event:click", check: params("DOMDebugger.setEventListenerBreakpoint", a{"eventName": "click"})},
-	{tool: "debugger", args: a{"action": "remove", "breakpointId": "bp-1"}, prior: priorBP, want: []string{enable, setBP, "Debugger.removeBreakpoint"}, text: "removed bp-1"},
-	{tool: "debugger", args: a{"action": "remove", "all": true}, prior: priorBP, want: []string{enable, setBP, "Debugger.removeBreakpoint"}, text: "removed 1 breakpoints"},
+	{tool: "debugger", args: a{"action": "remove", "breakpointId": "bp-1"}, prior: priorBP, want: []string{dom, overlay, enable, async, setBP, "Debugger.removeBreakpoint"}, text: "removed bp-1"},
+	{tool: "debugger", args: a{"action": "remove", "all": true}, prior: priorBP, want: []string{dom, overlay, enable, async, setBP, "Debugger.removeBreakpoint"}, text: "removed 1 breakpoint"},
 	{tool: "debugger", args: a{"action": "remove", "breakpointId": "nope"}, wantErr: `no breakpoint "nope"`},
-	{tool: "debugger", args: a{"action": "list"}, prior: priorBP, want: []string{enable, setBP}, text: "bp-1: line http://fake/app.js:12"},
-	{tool: "debugger", args: a{"action": "exceptions", "mode": "none"}, want: []string{enable, "Debugger.setPauseOnExceptions"}, check: params("Debugger.setPauseOnExceptions", a{"state": "none"})},
-	{tool: "debugger", args: a{"action": "exceptions", "mode": "uncaught"}, want: []string{enable, "Debugger.setPauseOnExceptions"}, text: "pause on exceptions: uncaught"},
-	{tool: "debugger", args: a{"action": "exceptions", "mode": "caught"}, want: []string{enable, "Debugger.setPauseOnExceptions"}, check: params("Debugger.setPauseOnExceptions", a{"state": "caught"})},
-	{tool: "debugger", args: a{"action": "exceptions", "mode": "all"}, want: []string{enable, "Debugger.setPauseOnExceptions"}, check: params("Debugger.setPauseOnExceptions", a{"state": "all"})},
+	{tool: "debugger", args: a{"action": "list"}, prior: priorBP, want: []string{dom, overlay, enable, async, setBP}, text: "bp-1: line http://fake/app.js:12"},
+	{tool: "debugger", args: a{"action": "exceptions", "mode": "none"}, want: []string{dom, overlay, enable, async, "Debugger.setPauseOnExceptions"}, check: params("Debugger.setPauseOnExceptions", a{"state": "none"})},
+	{tool: "debugger", args: a{"action": "exceptions", "mode": "uncaught"}, want: []string{dom, overlay, enable, async, "Debugger.setPauseOnExceptions"}, text: "pause on exceptions: uncaught"},
+	{tool: "debugger", args: a{"action": "exceptions", "mode": "caught"}, want: []string{dom, overlay, enable, async, "Debugger.setPauseOnExceptions"}, check: params("Debugger.setPauseOnExceptions", a{"state": "caught"})},
+	{tool: "debugger", args: a{"action": "exceptions", "mode": "all"}, want: []string{dom, overlay, enable, async, "Debugger.setPauseOnExceptions"}, check: params("Debugger.setPauseOnExceptions", a{"state": "all"})},
 
 	// debugger: execution control and inspection
-	{tool: "debugger", args: a{"action": "pause"}, want: []string{enable, "Debugger.pause", "Debugger.getScriptSource"}, text: "Paused (other) on bp-1\nat onClick (http://fake/app.js:12:3)"},
-	{tool: "debugger", args: a{"action": "resume", "timeoutMs": 50}, paused: true, want: []string{enable, "Debugger.resume"}, text: "running"},
-	{tool: "debugger", args: a{"action": "step_over"}, paused: true, want: []string{enable, "Debugger.stepOver", "Debugger.getScriptSource"}, text: "►   13  line 13"},
-	{tool: "debugger", args: a{"action": "step_into"}, paused: true, want: []string{enable, "Debugger.stepInto", "Debugger.getScriptSource"}, text: "app.js:13:3"},
-	{tool: "debugger", args: a{"action": "step_out"}, paused: true, want: []string{enable, "Debugger.stepOut", "Debugger.getScriptSource"}, text: "app.js:13:3"},
+	{tool: "debugger", args: a{"action": "pause"}, want: []string{dom, overlay, enable, async, "Debugger.pause", "Debugger.getScriptSource"}, text: "Paused (breakpoint) on bp-1\nat onClick (http://fake/app.js:12:3)"},
+	// A pause names the breakpoint it hit by what it watches.
+	{tool: "debugger", args: a{"action": "pause"}, prior: priorBP, text: "Paused (breakpoint) on http://fake/app.js:12 [bp-1]\nat onClick"},
+	{tool: "debugger", args: a{"action": "resume", "timeoutMs": 50}, paused: true, want: []string{dom, overlay, enable, async, "Debugger.resume"}, text: "running"},
+	{tool: "debugger", args: a{"action": "step_over"}, paused: true, want: []string{dom, overlay, enable, async, "Debugger.stepOver", "Debugger.getScriptSource"}, text: "►   13  line 13"},
+	{tool: "debugger", args: a{"action": "step_into"}, paused: true, want: []string{dom, overlay, enable, async, "Debugger.stepInto", "Debugger.getScriptSource"}, text: "app.js:13:3"},
+	{tool: "debugger", args: a{"action": "step_out"}, paused: true, want: []string{dom, overlay, enable, async, "Debugger.stepOut", "Debugger.getScriptSource"}, text: "app.js:13:3"},
 	{tool: "debugger", args: a{"action": "step_over"}, wantErr: "not paused"},
-	{tool: "debugger", args: a{"action": "continue_to", "url": "http://fake/app.js", "line": 20}, paused: true, want: []string{enable, "Debugger.continueToLocation", "Debugger.getScriptSource"},
+	{tool: "debugger", args: a{"action": "continue_to", "url": "http://fake/app.js", "line": 20}, paused: true, want: []string{dom, overlay, enable, async, "Debugger.continueToLocation", "Debugger.getScriptSource"},
 		check: params("Debugger.continueToLocation", a{"location": map[string]any{"scriptId": "7", "lineNumber": 19.0}})},
 	{tool: "debugger", args: a{"action": "continue_to", "url": "http://fake/other.js", "line": 2}, paused: true, wantErr: "no loaded script with URL http://fake/other.js"},
-	{tool: "debugger", args: a{"action": "wait"}, paused: true, want: []string{enable, "Debugger.getScriptSource"}, text: "Stack:\n  #0 onClick (http://fake/app.js:12:3)\n  #1 (anonymous) (http://fake/app.js:30:3)"},
+	{tool: "debugger", args: a{"action": "wait"}, paused: true, want: []string{dom, overlay, enable, async, "Debugger.getScriptSource"}, text: "Stack:\n  #0 onClick (http://fake/app.js:12:3)\n  #1 (anonymous) (http://fake/app.js:30:3)"},
 	{tool: "debugger", args: a{"action": "wait", "timeoutMs": 30}, wantErr: "no pause within 30ms"},
-	{tool: "debugger", args: a{"action": "stack"}, paused: true, want: []string{enable}, text: "#0 onClick (http://fake/app.js:12:3)"},
+	{tool: "debugger", args: a{"action": "stack"}, paused: true, want: []string{dom, overlay, enable, async}, text: "#0 onClick (http://fake/app.js:12:3)"},
 	{tool: "debugger", args: a{"action": "stack"}, wantErr: "not paused"},
-	{tool: "debugger", args: a{"action": "scope"}, paused: true, want: []string{enable, "Runtime.getProperties"},
+	{tool: "debugger", args: a{"action": "scope"}, paused: true, want: []string{dom, overlay, enable, async, "Runtime.getProperties"},
 		text: "local:\n  total = 42\n  cart = Cart {items: 3}  [obj-2]\n  t = (uninitialized)", check: params("Runtime.getProperties", a{"objectId": "scope-f0"})},
 	{tool: "debugger", args: a{"action": "scope", "frame": 1}, paused: true, check: params("Runtime.getProperties", a{"objectId": "scope-f1"})},
 	{tool: "debugger", args: a{"action": "scope", "frame": 5}, paused: true, wantErr: "frame must be 0-1"},
-	{tool: "debugger", args: a{"action": "properties", "objectId": "obj-2"}, want: []string{enable, "Runtime.getProperties"}, check: params("Runtime.getProperties", a{"objectId": "obj-2"})},
-	{tool: "debugger", args: a{"action": "evaluate", "expression": "total + 1", "frame": 0}, paused: true, want: []string{enable, "Debugger.evaluateOnCallFrame"},
+	{tool: "debugger", args: a{"action": "properties", "objectId": "obj-2"}, want: []string{dom, overlay, enable, async, "Runtime.getProperties", "Runtime.callFunctionOn"},
+		text: "readyState = 1  (getter)\nurl = \"ws://fake/live\"  (getter)", check: params("Runtime.getProperties", a{"objectId": "obj-2"})},
+	{tool: "debugger", args: a{"action": "evaluate", "expression": "total + 1", "frame": 0}, paused: true, want: []string{dom, overlay, enable, async, "Debugger.evaluateOnCallFrame"},
 		text: "3", check: params("Debugger.evaluateOnCallFrame", a{"callFrameId": "f0", "expression": "total + 1"})},
-	{tool: "debugger", args: a{"action": "evaluate", "expression": "1 + 1"}, want: []string{enable, "Runtime.evaluate"}, text: "2"},
-	{tool: "debugger", args: a{"action": "evaluate", "expression": "JSON.stringify(state)"}, want: []string{enable, "Runtime.evaluate"},
+	{tool: "debugger", args: a{"action": "evaluate", "expression": "1 + 1"}, want: []string{dom, overlay, enable, async, "Runtime.evaluate"}, text: "2"},
+	{tool: "debugger", args: a{"action": "evaluate", "expression": "JSON.stringify(state)"}, want: []string{dom, overlay, enable, async, "Runtime.evaluate"},
 		setup: func(e *env) {
 			e.cdp.Reply("Runtime.evaluate", fakecdp.Reply{Result: a{"result": a{"type": "string", "value": strings.Repeat("x", 300) + "END"}}})
 		}, text: "xEND\""},
-	{tool: "debugger", args: a{"action": "scripts", "filter": "app"}, want: []string{enable}, text: "http://fake/app.js  id=7  40 lines"},
-	{tool: "debugger", args: a{"action": "watch", "expression": "total"}, want: []string{enable}, text: "watching: total"},
-	{tool: "debugger", args: a{"action": "watch", "expression": "total + 1"}, paused: true, want: []string{enable, "Debugger.evaluateOnCallFrame"}, text: "watching: total + 1\ntotal + 1 = 3"},
+	{tool: "debugger", args: a{"action": "scripts", "filter": "app"}, want: []string{dom, overlay, enable, async}, text: "http://fake/app.js  id=7  40 lines"},
+	{tool: "debugger", args: a{"action": "watch", "expression": "total"}, want: []string{dom, overlay, enable, async}, text: "watching: total"},
+	{tool: "debugger", args: a{"action": "watch", "expression": "total + 1"}, paused: true, want: []string{dom, overlay, enable, async, "Debugger.evaluateOnCallFrame"}, text: "watching: total + 1\ntotal + 1 = 3"},
 	{tool: "debugger", args: a{"action": "pause"}, prior: []toolCall{{"debugger", a{"action": "watch", "expression": "total"}}},
-		want: []string{enable, "Debugger.pause", "Debugger.getScriptSource", "Debugger.evaluateOnCallFrame"}, text: "Watch:\n  total = 3\nStack:"},
+		want: []string{dom, overlay, enable, async, "Debugger.pause", "Debugger.getScriptSource", "Debugger.evaluateOnCallFrame"}, text: "Watch:\n  total = 3\nStack:"},
 	{tool: "debugger", args: a{"action": "unwatch", "expression": "total"}, prior: []toolCall{{"debugger", a{"action": "watch", "expression": "total"}}}, text: "no watch expressions"},
 	{tool: "debugger", args: a{"action": "unwatch", "all": true}, prior: []toolCall{{"debugger", a{"action": "watch", "expression": "a"}}, {"debugger", a{"action": "watch", "expression": "b"}}}, text: "no watch expressions"},
 	{tool: "debugger", args: a{"action": "unwatch"}, wantErr: "expression or all is required"},
-	{tool: "debugger", args: a{"action": "search", "query": "line 12", "filter": "app"}, want: []string{enable, "Debugger.getScriptSource"},
+	{tool: "debugger", args: a{"action": "search", "query": "line 12", "filter": "app"}, want: []string{dom, overlay, enable, async, "Debugger.getScriptSource"},
 		text: "http://fake/app.js:12:1  …", check: params("Debugger.getScriptSource", a{"scriptId": "7"})},
-	{tool: "debugger", args: a{"action": "search", "query": "nowhere"}, want: []string{enable, "Debugger.getScriptSource"}, text: "(no matches)"},
+	{tool: "debugger", args: a{"action": "search", "query": "nowhere"}, want: []string{dom, overlay, enable, async, "Debugger.getScriptSource"}, text: "(no matches)"},
 	{tool: "debugger", args: a{"action": "search"}, wantErr: "query is required for search"},
-	{tool: "debugger", args: a{"action": "source", "script": "http://fake/app.js", "from": 10, "to": 11}, want: []string{enable, "Debugger.getScriptSource"},
+	{tool: "debugger", args: a{"action": "source", "script": "http://fake/app.js", "from": 10, "to": 11}, want: []string{dom, overlay, enable, async, "Debugger.getScriptSource"},
 		text: "    10  line 10\n    11  line 11", check: params("Debugger.getScriptSource", a{"scriptId": "7"})},
-	{tool: "debugger", args: a{"action": "listeners", "selector": "button"}, want: []string{enable, "Runtime.evaluate", "DOMDebugger.getEventListeners"},
+	{tool: "debugger", args: a{"action": "listeners", "selector": "button"}, want: []string{dom, overlay, enable, async, "Runtime.evaluate", "DOMDebugger.getEventListeners"},
 		text: "click passive at http://fake/app.js:12:3: ƒ function onClick(e) {", check: func(t *testing.T, s *fakecdp.Server) {
 			params("DOMDebugger.getEventListeners", a{"objectId": "node-1"})(t, s)
 			params("Runtime.evaluate", a{"objectGroup": "agent-browser-mcp"})(t, s)
 		}},
 	{tool: "debugger", args: a{"action": "status"}, text: "debugger off"},
-	{tool: "debugger", args: a{"action": "status"}, prior: priorBP, want: []string{enable, setBP}, text: "debugger on; 1 breakpoints; pause on exceptions: none\nrunning"},
-	{tool: "debugger", args: a{"action": "disable"}, prior: priorBP, want: []string{enable, setBP, "Debugger.disable"}, text: "debugger off"},
+	{tool: "debugger", args: a{"action": "status"}, prior: priorBP, want: []string{dom, overlay, enable, async, setBP}, text: "debugger on; 1 breakpoint; pause on exceptions: none\nrunning"},
+	{tool: "debugger", args: a{"action": "disable"}, prior: priorBP, want: []string{dom, overlay, enable, async, setBP, "Debugger.disable"}, text: "debugger off"},
 	{tool: "debugger", args: a{"action": "disable"}, paused: true, prior: []toolCall{{"debugger", a{"action": "scripts"}}},
-		want: []string{enable, "Debugger.resume", "Debugger.disable"}, text: "page resumed"},
+		want: []string{dom, overlay, enable, async, "Debugger.resume", "Debugger.disable"}, text: "page resumed"},
 
 	// performance over CDP
 	{tool: "performance", args: a{"action": "metrics"}, want: []string{"Performance.enable", "Performance.getMetrics"}, text: "Counting starts now, so counts and durations are 0 on this first call; load or interact with the page, then call metrics again.\nJSHeapUsedSize: 1.0 MB\nNodes: 42\nScriptDuration: 12.0 ms\nThreadTime: 0.8 ms"},
@@ -487,10 +528,59 @@ func TestActionReturnsWhenItHitsABreakpoint(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("click waited %v instead of returning on the pause", elapsed)
 	}
-	for _, want := range []string{"Paused (other) on bp-1", "► ", "(click finishes after you resume"} {
+	for _, want := range []string{"Paused (breakpoint) on http://fake/app.js:12 [bp-1]", "► ", "(click finishes after you resume"} {
 		if !strings.Contains(res.text(), want) {
 			t.Errorf("missing %q in:\n%s", want, res.text())
 		}
+	}
+}
+
+// TestCancelledActionWhileDebuggingReturns: while debugging, actions run
+// the CLI on a context that outlives the call (a paused page holds it), so
+// the handler itself must give up when the call is cancelled or the server
+// stops; it used to wait and hold up the server's exit.
+func TestCancelledActionWhileDebuggingReturns(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.withCDP()
+	e.call("debugger", a{"action": "scripts"})
+	e.fake.SleepMS(10000, "click")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var req mcp.CallToolRequest
+	req.Params.Name = "click"
+	req.Params.Arguments = map[string]any{"selector": "#buy"}
+	start := time.Now()
+	res, _ := e.reg.handlers["click"](ctx, req)
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("click held on for %v after its call was cancelled", took)
+	}
+	if res == nil || !res.IsError || !strings.Contains(resultText(res), "cancelled") {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// TestPauseJustAfterAnActionIsReported: a click handler that defers its
+// work (setTimeout) reaches the breakpoint after the click returned.
+func TestPauseJustAfterAnActionIsReported(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	s := e.withCDP()
+	e.reg.pauseGrace = 2 * time.Second
+	e.call("debugger", a{"action": "scripts"})
+	// Pause once agent-browser has the click, as a timer callback would.
+	go func() {
+		for !slices.ContainsFunc(e.fake.Commands(), func(c []string) bool { return c[0] == "click" }) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+		s.Push(pausedAt(12))
+	}()
+	got := e.call("click", a{"selector": "#buy"}).text()
+	// Usually the click has returned by then; on a slow machine the pause can
+	// still beat it. Either way the result reports the pause.
+	if !strings.Contains(got, "Then the page paused:\nPaused (breakpoint) on bp-1") && !strings.Contains(got, "(click finishes after you resume") {
+		t.Errorf("pause not reported:\n%s", got)
 	}
 }
 
@@ -746,4 +836,34 @@ func TestDebuggerReachesPagePausedBeforeRestart(t *testing.T) {
 	if res.IsError || !strings.Contains(res.text(), "onClick") {
 		t.Fatalf("got isError=%v %q", res.IsError, res.text())
 	}
+}
+
+// TestPausedBanner: someone watching the browser sees why the page stopped
+// responding, and the banner goes away on resume.
+func TestPausedBanner(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	s := e.withCDP()
+	banner := func() (any, bool) {
+		p := s.Params(fakecdp.PausedBanner)
+		return p["message"], p != nil
+	}
+	waitBanner := func(want any) {
+		t.Helper()
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if got, sent := banner(); sent && got == want {
+				return
+			}
+		}
+		got, _ := banner()
+		t.Fatalf("banner message %v, want %v", got, want)
+	}
+	if res := e.call("debugger", a{"action": "pause"}); res.IsError {
+		t.Fatal(res.text())
+	}
+	waitBanner("Paused in debugger")
+	if res := e.call("debugger", a{"action": "resume"}); res.IsError {
+		t.Fatal(res.text())
+	}
+	waitBanner(nil)
 }

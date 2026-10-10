@@ -60,7 +60,13 @@ func (r *Registry) handleBatch(ctx context.Context, req mcp.CallToolRequest) (*m
 	}
 
 	summary := fmt.Sprintf("batch: %d/%d steps ran, %d failed", ran, len(steps), failed)
-	res.Content = append([]mcp.Content{mcp.NewTextContent(summary)}, res.Content...)
+	// One text block: clients that join adjacent text contents without a
+	// separator showed "0 failed#1 snapshot".
+	if first, ok := firstText(res); ok {
+		res.Content[0] = mcp.NewTextContent(summary + "\n" + first)
+	} else {
+		res.Content = append([]mcp.Content{mcp.NewTextContent(summary)}, res.Content...)
+	}
 	if failed > 0 && bail {
 		res.IsError = true
 		return res, nil
@@ -102,4 +108,12 @@ func (r *Registry) runStep(ctx context.Context, raw any, session string) (string
 		return tool, mcp.NewToolResultError(err.Error())
 	}
 	return tool, out
+}
+
+func firstText(res *mcp.CallToolResult) (string, bool) {
+	if len(res.Content) == 0 {
+		return "", false
+	}
+	t, ok := res.Content[0].(mcp.TextContent)
+	return t.Text, ok
 }

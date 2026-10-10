@@ -108,6 +108,12 @@ func (f *Fake) SetVersion(text string) { f.write("version", text) }
 // a CLI error.
 func (f *Fake) FailOn(cmd string) { f.write("fail", cmd) }
 
+// FailWith makes a subcommand fail with this error message.
+func (f *Fake) FailWith(cmd, msg string) {
+	f.write("fail", cmd)
+	f.write("fail-msg", msg)
+}
+
 // SleepMS delays responses to the given subcommands, or to every call when
 // none are given.
 func (f *Fake) SleepMS(ms int, cmds ...string) {
@@ -258,7 +264,12 @@ func serve(dir string, argv []string) int {
 	}
 
 	if fail, ok := read(dir, "fail"); ok && (fail == name || fail == name+" "+sub) {
-		fmt.Print(`{"success":false,"data":null,"error":"fake failure"}`)
+		msg, ok := read(dir, "fail-msg")
+		if !ok {
+			msg = "fake failure"
+		}
+		b, _ := json.Marshal(msg)
+		fmt.Printf(`{"success":false,"data":null,"error":%s}`, b)
 		return 1
 	}
 	if slices.Contains(cmd, "--help") {

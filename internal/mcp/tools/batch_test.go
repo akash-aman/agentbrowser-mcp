@@ -126,7 +126,7 @@ func TestBatchSnapshotAfterSteps(t *testing.T) {
 		a{"tool": "click", "args": a{"selector": "@e1"}},
 	}})
 	got := e.fake.Commands()
-	if !reflect.DeepEqual(got[len(got)-1], cmd("diff", "snapshot", "-c")) {
+	if !reflect.DeepEqual(got[len(got)-1], cmd("snapshot")) {
 		t.Fatalf("want a trailing snapshot diff, got %q", got)
 	}
 	if !strings.Contains(res.text(), "Changes:") {

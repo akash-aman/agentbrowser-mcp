@@ -71,7 +71,7 @@ func TestInstructionsNameRealTools(t *testing.T) {
 	cfg := &config.Config{Toolsets: config.AllToolsets, DefaultTimeout: 1000, AgentBrowserPath: "agent-browser"}
 	reg := tools.NewRegistry(cfg, browser.NewManager(cfg))
 	text := BuildInstructions(cfg, browser.CLIVersion{})
-	for _, name := range []string{"navigate", "snapshot", "page_text", "mouse", "screenshot", "batch", "find", "eval_script", "wait", "network", "console", "debugger", "performance", "debug_ui", "application", "emulate", "close_browser"} {
+	for _, name := range []string{"navigate", "snapshot", "page_text", "mouse", "screenshot", "batch", "find", "eval_script", "wait", "network", "console", "debugger", "performance", "debug_ui", "application", "emulate", "close_browser", "elements"} {
 		if !strings.Contains(text, name) {
 			t.Errorf("instructions no longer mention %s", name)
 		}
@@ -103,6 +103,10 @@ func TestInstructionsNameRealArguments(t *testing.T) {
 		{"debugger", "action", "breakpoint"},
 		{"debugger", "action", "scope"},
 		{"screenshot", "annotate", ""},
+		{"elements", "action", "styles"},
+		{"elements", "action", "computed"},
+		{"elements", "action", "contrast"},
+		{"elements", "action", "a11y"},
 	}
 	props := map[string]map[string]any{}
 	for _, st := range reg.Tools() {

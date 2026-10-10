@@ -2,9 +2,11 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,10 +19,12 @@ import (
 
 func (r *Registry) registerPerformance() {
 	r.add(config.ToolsetDevtools, mcp.NewTool("performance",
-		mcp.WithDescription("Find why a page is slow or heavy: Web Vitals (LCP, CLS, INP), navigation timing and slowest resources, runtime metrics, memory and heap snapshots for leaks, JS/CSS coverage for unused code, Lighthouse audits (performance, accessibility, best practices, SEO), and traces or CPU profiles summarized on stop with a main-thread heatmap. Use it unasked when a page loads slowly, janks or grows in memory, and before and after a performance fix to show the change. Start with vitals or metrics; lighthouse takes 20-60s and clears the cache itself, so it needs no fresh session, and a trace and a CPU profile cannot record at the same time."),
+		mcp.WithDescription("Find why a page is slow or heavy: Web Vitals (LCP, CLS, INP), a filmstrip of the load, navigation timing, runtime metrics, heap snapshots compared for leaks with retainer paths, live object counts, JS/CSS coverage, Lighthouse audits, and traces (with LCP, layout shift and render-blocking insights) or CPU profiles (self and total time) summarized on stop. Use it unasked when a page loads slowly, janks or grows in memory, and before and after a performance fix to show the change. Start with vitals or metrics; lighthouse takes 20-60s and clears the cache itself, so it needs no fresh session, and a trace and a CPU profile cannot record at the same time."),
 		mcp.WithString("action", mcp.Required(), mcp.Enum(performanceActions...)),
 		mcp.WithString("url", mcp.Description("vitals/lighthouse: URL to load. Default current page.")),
-		mcp.WithString("path", mcp.Description("trace_stop/profiler_stop/heap_snapshot/lighthouse: output file. Default temp dir. heatmap: recording to read; default the last one.")),
+		mcp.WithString("path", mcp.Description("trace_stop/profiler_stop/heap_snapshot/lighthouse: output file. Default temp dir. heatmap: recording to read; heap_diff/retainers: snapshot to read; default the last one.")),
+		mcp.WithString("baseline", mcp.Description("heap_diff: earlier snapshot to compare with. Default the one before path.")),
+		mcp.WithString("constructor", mcp.Description("retainers/query_objects: constructor name, e.g. Widget or HTMLDivElement.")),
 		mcp.WithNumber("bucketMs", mcp.Description("heatmap: column width in ms. Default fits 60 columns.")),
 		mcp.WithBoolean("json", mcp.Description("heatmap: return the numbers as JSON, e.g. to draw a chart.")),
 		mcp.WithNumber("limit", mcp.Description("timing/coverage_stop/heap_snapshot/profiler_stop/trace_stop: rows to show. Default 10.")),
@@ -33,6 +37,7 @@ func (r *Registry) registerPerformance() {
 var performanceActions = []string{
 	"vitals", "timing", "memory", "metrics", "heap_snapshot", "coverage_start", "coverage_stop", "lighthouse",
 	"trace_start", "trace_stop", "profiler_start", "profiler_stop", "heatmap",
+	"filmstrip", "heap_diff", "retainers", "query_objects",
 }
 
 // timingScript reports navigation milestones and the slowest resources, read
@@ -40,21 +45,23 @@ var performanceActions = []string{
 const timingScript = `(() => {
   const n = performance.getEntriesByType("navigation")[0] || {};
   const ms = v => Math.round(v || 0);
-  const slowest = performance.getEntriesByType("resource")
-    .map(e => ({ url: e.name.length > 120 ? e.name.slice(0, 117) + "…" : e.name, type: e.initiatorType, ms: ms(e.duration), kb: Math.round((e.transferSize || 0) / 1024) }))
-    .sort((a, b) => b.ms - a.ms).slice(0, %d);
-  return {
-    navigation: { ttfb: ms(n.responseStart), domContentLoaded: ms(n.domContentLoadedEventEnd), load: ms(n.loadEventEnd), transferKb: Math.round((n.transferSize || 0) / 1024) },
-    resources: performance.getEntriesByType("resource").length,
-    slowest,
-  };
+  const size = v => !v ? "cached" : v < 1024 ? v + " B" : (v / 1024).toFixed(1) + " KB";
+  const all = performance.getEntriesByType("resource");
+  const lines = ["navigation: TTFB " + ms(n.responseStart) + " ms, DOMContentLoaded " + ms(n.domContentLoadedEventEnd) +
+    " ms, load " + ms(n.loadEventEnd) + " ms, " + size(n.transferSize) + " transferred",
+    all.length + " resources" + (all.length ? ", slowest first:" : "")];
+  all.map(e => [ms(e.duration), e.initiatorType, size(e.transferSize), e.name.length > 120 ? e.name.slice(0, 117) + "…" : e.name])
+    .sort((a, b) => b[0] - a[0]).slice(0, %d)
+    .forEach(([d, type, kb, url]) => lines.push(String(d).padStart(6) + " ms  " + type.padEnd(8) + kb.padStart(9) + "  " + url));
+  return lines.join("\n");
 })()`
 
 // memoryScript reports JS heap use (Chromium only) and DOM size.
 const memoryScript = `(() => {
-  const m = performance.memory || {};
-  const mb = v => v ? Math.round(v / 1048576 * 10) / 10 : null;
-  return { jsHeapUsedMb: mb(m.usedJSHeapSize), jsHeapTotalMb: mb(m.totalJSHeapSize), jsHeapLimitMb: mb(m.jsHeapSizeLimit), domNodes: document.getElementsByTagName("*").length, iframes: document.querySelectorAll("iframe").length };
+  const m = performance.memory;
+  const mb = v => (v / 1048576).toFixed(1) + " MB";
+  const heap = m ? "JS heap: " + mb(m.usedJSHeapSize) + " used of " + mb(m.totalJSHeapSize) + " allocated (limit " + mb(m.jsHeapSizeLimit) + ")" : "JS heap: not reported by this browser";
+  return heap + "\nDOM: " + document.getElementsByTagName("*").length + " elements, " + document.querySelectorAll("iframe").length + " iframes";
 })()`
 
 // performanceArgv maps the actions the CLI handles; the rest use CDP.
@@ -85,7 +92,14 @@ var cdpPerformance = map[string]performanceAction{
 	"metrics": func(_ *Registry, ctx context.Context, _ mcp.CallToolRequest, p *devtools.Page) (string, error) {
 		return p.Metrics(ctx)
 	},
-	"heap_snapshot":  (*Registry).heapSnapshot,
+	"heap_snapshot": (*Registry).heapSnapshot,
+	"query_objects": func(_ *Registry, ctx context.Context, req mcp.CallToolRequest, p *devtools.Page) (string, error) {
+		name := req.GetString("constructor", "")
+		if name == "" {
+			return "", errRequired("constructor", "query_objects")
+		}
+		return p.QueryObjects(ctx, name)
+	},
 	"coverage_start": coverageStart,
 	"coverage_stop":  coverageStop,
 	"lighthouse":     (*Registry).lighthouse,
@@ -97,8 +111,13 @@ func (r *Registry) handlePerformance(ctx context.Context, req mcp.CallToolReques
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	action := req.GetString("action", "")
-	if action == "heatmap" {
+	switch action {
+	case "heatmap":
 		return r.heatmap(req), nil
+	case "heap_diff", "retainers":
+		return r.heapFiles(req, action), nil
+	case "filmstrip":
+		return r.filmstrip(ctx, req), nil
 	}
 	cdpAction, viaCDP := cdpPerformance[action]
 	if !viaCDP {
@@ -122,6 +141,16 @@ func (r *Registry) runAndSummarize(ctx context.Context, req mcp.CallToolRequest,
 		"trace_stop":    func(f *os.File, n int) (string, error) { return devtools.SummarizeTrace(f, n) },
 		"profiler_stop": func(f *os.File, n int) (string, error) { return devtools.SummarizeCPUProfile(f, n) },
 	}[action]
+	if action == "vitals" {
+		res, err := r.mgr.Run(ctx, getSession(req), args...)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error())
+		}
+		if text, ok := formatVitals(res.Data); ok {
+			return textResult(text, r.cfg.MaxOutput)
+		}
+		return textResult(body(res), r.cfg.MaxOutput)
+	}
 	if summarize == nil {
 		return r.run(ctx, req, args...)
 	}
@@ -174,6 +203,7 @@ func (r *Registry) heapSnapshot(ctx context.Context, req mcp.CallToolRequest, pa
 	if err != nil {
 		return "", err
 	}
+	r.rememberHeapSnapshot(getSession(req), path)
 	lines := []string{
 		fmt.Sprintf("heap snapshot: %s (%s file, opens in Chrome DevTools > Memory)", s.Path, size(float64(s.FileBytes))),
 		fmt.Sprintf("%d objects, %s self size, %d detached DOM nodes", s.Nodes, size(float64(s.TotalSelfSize)), s.DetachedDOMNodes),
@@ -264,4 +294,61 @@ func percent(part, total int) float64 {
 		return 0
 	}
 	return 100 * float64(part) / float64(total)
+}
+
+// heapFiles compares two heap snapshots or explains what retains objects in
+// one; both read files, so they work on snapshots from earlier too.
+func (r *Registry) heapFiles(req mcp.CallToolRequest, action string) *mcp.CallToolResult {
+	snaps := r.heapSnapshots(getSession(req))
+	after := req.GetString("path", "")
+	if after == "" && len(snaps) > 0 {
+		after = snaps[len(snaps)-1]
+	}
+	if after == "" {
+		return mcp.NewToolResultError("no heap snapshot yet: take one with heap_snapshot, or pass path")
+	}
+	limit := int(req.GetFloat("limit", 10))
+	var text string
+	var err error
+	if action == "retainers" {
+		name := req.GetString("constructor", "")
+		if name == "" {
+			return mcp.NewToolResultError(errRequired("constructor", "retainers").Error())
+		}
+		text, err = devtools.Retainers(after, name, min(limit, 5))
+	} else {
+		before := req.GetString("baseline", "")
+		if before == "" {
+			if i := slices.Index(snaps, after); i > 0 {
+				before = snaps[i-1]
+			} else if len(snaps) >= 2 && after != snaps[len(snaps)-2] {
+				before = snaps[len(snaps)-2]
+			}
+		}
+		if before == "" {
+			return mcp.NewToolResultError("heap_diff needs two snapshots: take one before and one after using the page, or pass baseline")
+		}
+		text, err = devtools.HeapDiff(before, after, limit)
+	}
+	if err != nil {
+		return mcp.NewToolResultError(err.Error())
+	}
+	return textResult(text, r.cfg.MaxOutput)
+}
+
+// filmstrip reloads the page (or opens url) and returns what it looked like
+// over time as one image.
+func (r *Registry) filmstrip(ctx context.Context, req mcp.CallToolRequest) *mcp.CallToolResult {
+	page, err := r.livePage(ctx, req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error())
+	}
+	img, summary, err := page.Filmstrip(ctx, req.GetString("url", ""), 10*time.Second)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error())
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{
+		mcp.NewTextContent(summary),
+		mcp.NewImageContent(base64.StdEncoding.EncodeToString(img), "image/png"),
+	}}
 }

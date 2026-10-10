@@ -79,6 +79,29 @@ func TestHealthWaitsWhileDebugging(t *testing.T) {
 	}
 }
 
+// TestHealthWithDebuggerOnButNothingToPause: edit_source turns the
+// debugger on, and page loads then reported no problems for the rest of the
+// session. Only a breakpoint or exception pause can stop a load.
+func TestHealthWithDebuggerOnButNothingToPause(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.withCDP()
+	e.call("debugger", a{"action": "scripts"}) // debugger on, no breakpoints
+	e.fake.Respond("network requests", `{"requests":[{"status":404,"resourceType":"Image","url":"http://fake/missing.png","timestamp":99999999999999}]}`)
+	got := e.call("navigate", a{"url": "http://fake/broken"}).text()
+	if !strings.Contains(got, "404 Image http://fake/missing.png") {
+		t.Fatalf("health off while the debugger was on with nothing to pause:\n%s", got)
+	}
+	e.call("debugger", a{"action": "exceptions", "mode": "uncaught"})
+	e.fake.Reset()
+	e.call("navigate", a{"url": "http://fake/broken"})
+	for _, c := range e.fake.Commands() {
+		if c[0] == "errors" || c[0] == "network" {
+			t.Fatalf("health ran while an exception could pause the load: %q", e.fake.Commands())
+		}
+	}
+}
+
 func TestHealthNoteListsTheFirstFew(t *testing.T) {
 	t.Parallel()
 	var errs []string

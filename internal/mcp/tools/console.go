@@ -140,6 +140,9 @@ func (f lineFilter) apply(lines []string) string {
 	if f.pattern != nil {
 		header += fmt.Sprintf(" (%d matched pattern)", len(matched))
 	}
+	if len(shown) == 0 {
+		return header
+	}
 	return header + "\n" + strings.Join(shown, "\n")
 }
 
@@ -149,7 +152,15 @@ func (f lineFilter) match(lines []string) []string {
 	}
 	var kept []string
 	for _, l := range lines {
-		if f.pattern.MatchString(l) {
+		// "[log] price 5": ^price should match the message, and \[error\]
+		// the level.
+		message := l
+		if strings.HasPrefix(l, "[") {
+			if _, rest, ok := strings.Cut(l, "] "); ok {
+				message = rest
+			}
+		}
+		if f.pattern.MatchString(l) || f.pattern.MatchString(message) {
 			kept = append(kept, l)
 		}
 	}

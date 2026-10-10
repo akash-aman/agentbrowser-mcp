@@ -99,7 +99,7 @@ func (r *Registry) handleScreenshot(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 	notes = append(notes, shot.legend()...)
-	if !req.GetBool("annotate", false) {
+	if !req.GetBool("annotate", false) && req.GetString("selector", "") == "" {
 		notes = append(notes, hintAnnotate)
 	}
 	appendText(res, truncate(strings.Join(notes, "\n"), r.cfg.MaxOutput))

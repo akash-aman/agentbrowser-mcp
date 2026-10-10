@@ -3,12 +3,17 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/vercel-labs/agent-browser-mcp/internal/config"
+	"github.com/vercel-labs/agent-browser-mcp/internal/devtools"
 )
 
 // registerCore adds navigation and element interaction tools.
@@ -48,11 +53,11 @@ func (r *Registry) registerCore() {
 	), r.visibleOnly(typeTarget, typeArgv))
 
 	r.add(core, mcp.NewTool("press_key",
-		mcp.WithDescription("Press a key or combo (Enter, Tab, Control+a), or hold/release one with down/up."),
+		mcp.WithDescription("Press a key or combo (Enter, Tab, Control+a), or hold/release one with down/up. Control or Meta with a, c, x, v, z or y selects all, copies, cuts, pastes, undoes or redoes on every OS."),
 		mcp.WithString("key", mcp.Required(), mcp.Description("Key or combination. Modifiers: Control, Shift, Alt, Meta.")),
 		mcp.WithString("action", mcp.Enum("press", "down", "up"), mcp.Description("Default press.")),
 		snapshotParam(), sessionParam(), mutating(),
-	), r.action(pressKeyArgv))
+	), r.handlePressKey)
 
 	r.add(core, mcp.NewTool("element_action",
 		mcp.WithDescription("Hover, focus, check, uncheck, scroll into view, or highlight an element."),
@@ -96,13 +101,14 @@ func (r *Registry) registerCore() {
 		selectorParam(true),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Where to save the file.")),
 		sessionParam(), mutating(),
-	), r.cli(downloadArgv))
+	), r.handleDownload)
 
 	r.add(core, mcp.NewTool("eval_script",
-		mcp.WithDescription("Run JavaScript in the page and return the result. Fallback — prefer get, find or page_text, which are cheaper and safer."),
+		mcp.WithDescription("Run JavaScript in the page, an iframe or a worker and return the result. Fallback — prefer get, find or page_text, which are cheaper and safer."),
 		mcp.WithString("script", mcp.Required(), mcp.Description("JavaScript expression or statements.")),
+		mcp.WithString("frame", mcp.Description("Run in an iframe (name or part of its URL) or a worker (worker:<part of its URL>) instead of the page.")),
 		sessionParam(), mutating(),
-	), r.cli(evalArgv))
+	), r.handleEval)
 
 	r.add(core, mcp.NewTool("close_browser",
 		mcp.WithDescription("Close the browser for a session, or every session with all:true."),
@@ -227,6 +233,62 @@ func typeArgv(req mcp.CallToolRequest) ([]string, error) {
 	return b.done()
 }
 
+// handlePressKey runs editing shortcuts as the commands they stand for on
+// macOS, where "Meta+a" reached the page as keys but selected nothing.
+// "Control+a" there moves to the line start, but a model sending it means
+// select all, as on Linux and Windows, so both modifiers work.
+func (r *Registry) handlePressKey(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	key := req.GetString("key", "")
+	command, letter, mods := editingShortcut(key)
+	if !r.macEditing || command == "" || req.GetString("action", "press") != "press" {
+		return r.action(pressKeyArgv)(ctx, req)
+	}
+	page, err := r.livePage(ctx, req)
+	if err != nil {
+		return r.action(pressKeyArgv)(ctx, req)
+	}
+	if err := page.KeyCommand(ctx, letter, mods, command); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	res := mcp.NewToolResultText("pressed: " + key + " (" + command + ")")
+	r.appendSnapshot(ctx, req, res)
+	return res, nil
+}
+
+// editingShortcut maps Control or Meta (with Shift for redo) plus a, c, x,
+// v, z or y to its editing command, the letter and Meta-based modifiers.
+func editingShortcut(key string) (command, letter string, mods int) {
+	parts := strings.Split(key, "+")
+	letter = strings.ToLower(parts[len(parts)-1])
+	primary, shift := false, false
+	for _, m := range parts[:len(parts)-1] {
+		switch strings.ToLower(m) {
+		case "control", "ctrl", "meta", "cmd", "command", "controlormeta":
+			primary = true
+		case "shift":
+			shift = true
+		default:
+			return "", "", 0
+		}
+	}
+	if !primary {
+		return "", "", 0
+	}
+	commands := map[string]string{"a": "selectAll", "c": "copy", "x": "cut", "v": "paste", "z": "undo", "y": "redo"}
+	command = commands[letter]
+	if shift {
+		if letter != "z" {
+			return "", "", 0
+		}
+		command = "redo"
+	}
+	mods = devtools.ModMeta
+	if shift {
+		mods |= devtools.ModShift
+	}
+	return command, letter, mods
+}
+
 func pressKeyArgv(req mcp.CallToolRequest) ([]string, error) {
 	b := newArgv(req)
 	key := b.required("key")
@@ -268,9 +330,69 @@ func uploadArgv(req mcp.CallToolRequest) ([]string, error) {
 	return b.add(b.required("selector")).add(b.list("files")...).done()
 }
 
+// handleDownload downloads through agent-browser, except in a window from
+// tabs new_window: that window is a separate browser context, which
+// agent-browser does not set up for downloads, so the file is saved over CDP.
+func (r *Registry) handleDownload(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args, err := downloadArgv(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	page, err := r.livePage(ctx, req)
+	if err != nil {
+		return r.cli(downloadArgv)(ctx, req)
+	}
+	contextID, separate := page.SeparateContext(ctx)
+	if !separate {
+		return r.cli(downloadArgv)(ctx, req)
+	}
+	path, err := filepath.Abs(args[2])
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	click := func() error {
+		_, err := r.mgr.Run(ctx, getSession(req), "click", args[1])
+		return err
+	}
+	text, err := page.DownloadInContext(ctx, contextID, path, click, time.Duration(r.cfg.DefaultTimeout)*time.Millisecond)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(text), nil
+}
+
 func downloadArgv(req mcp.CallToolRequest) ([]string, error) {
 	b := newArgv(req, "download")
 	return b.add(b.required("selector"), b.required("path")).done()
+}
+
+// handleEval runs scripts over CDP the way the Console does, in the page or
+// in an iframe or worker, which the CLI cannot reach. The CLI's eval left a
+// top-level const declared, so running a script again failed with "Identifier
+// has already been declared"; it is the fallback when CDP is unavailable.
+func (r *Registry) handleEval(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	script, err := evalArgv(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	where := req.GetString("frame", "")
+	page, err := r.livePage(ctx, req)
+	if err != nil {
+		if where == "" && !errors.Is(err, devtools.ErrPaused) {
+			return r.cli(evalArgv)(ctx, req)
+		}
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	var text string
+	if where == "" {
+		text, err = page.EvaluateScript(ctx, script[1])
+	} else {
+		text, err = page.EvaluateIn(ctx, where, script[1])
+	}
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return textResult(text, r.cfg.MaxOutput), nil
 }
 
 func evalArgv(req mcp.CallToolRequest) ([]string, error) {

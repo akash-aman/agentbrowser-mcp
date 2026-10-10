@@ -147,9 +147,9 @@ func coverage(events []traceEvent, start, bucketMs float64, columns int) []float
 // scriptTimeByFile sums CPU-sample self time per script URL, when the
 // recording has samples (profiler recordings do; plain traces do not).
 func scriptTimeByFile(events []traceEvent, top int) []FileCost {
-	self, _ := traceSelfTimes(events)
+	tree, _ := traceSelfTimes(events)
 	byURL := map[string]float64{}
-	for f, ms := range self {
+	for f, ms := range tree.selfByFunction() {
 		if f.URL != "" {
 			byURL[f.URL] += ms
 		}

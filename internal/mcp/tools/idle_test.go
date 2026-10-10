@@ -33,7 +33,8 @@ func TestRestartNoteInsideBatch(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t, func(c *config.Config) { c.IdleTimeout = 15 * time.Minute })
 	e.call("get", a{"what": "url"})
-	e.fake.Respond("get", `{"url":"about:blank","lifecycle":{"launched":true}}`)
+	// Only the first step's call reports the launch.
+	e.fake.Respond("get url", `{"url":"about:blank","lifecycle":{"launched":true}}`)
 	got := e.call("batch", a{"steps": []any{
 		map[string]any{"tool": "get", "args": map[string]any{"what": "url"}},
 		map[string]any{"tool": "tabs", "args": map[string]any{"action": "list"}},

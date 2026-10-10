@@ -357,6 +357,11 @@ func TestRemoteObjectString(t *testing.T) {
 			Type  string `json:"type"`
 			Value string `json:"value"`
 		}{{"items", "number", "3"}, {"owner", "string", "ann"}}, Overflow: true}}, `Cart {items: 3, owner: "ann", …}`},
+		{"function in a preview", RemoteObject{Type: "object", ClassName: "WebSocket", Preview: &ObjectPreview{Properties: []struct {
+			Name  string `json:"name"`
+			Type  string `json:"type"`
+			Value string `json:"value"`
+		}{{"readyState", "number", "1"}, {"onopen", "function", ""}}}}, "WebSocket {readyState: 1, onopen: ƒ}"},
 		{"array preview", RemoteObject{Type: "object", Subtype: "array", Preview: &ObjectPreview{Subtype: "array", Description: "Array(2)", Properties: []struct {
 			Name  string `json:"name"`
 			Type  string `json:"type"`
@@ -412,15 +417,15 @@ func TestFindAll(t *testing.T) {
 func TestSourceContext(t *testing.T) {
 	t.Parallel()
 	short := "a\nb\nc\nd\ne"
-	if got := sourceContext(short, 3, 1); !strings.Contains(got, "►    3  c") || !strings.Contains(got, "     1  a") {
+	if got := sourceContext(short, 3, 1, 1, 0); !strings.Contains(got, "►    3  c") || !strings.Contains(got, "     1  a") {
 		t.Fatalf("short code shows numbered lines, got %q", got)
 	}
 	minified := strings.Repeat("x", 300) + "onClick:()=>void(toggle())" + strings.Repeat("y", 300)
-	got := sourceContext("// header\n"+minified, 2, 313)
+	got := sourceContext("// header\n"+minified, 2, 313, 1, 0)
 	if !strings.HasPrefix(got, "►    2:313  …") || !strings.Contains(got, "onClick:()=>▶void(toggle())") || !strings.HasSuffix(got, "…") {
 		t.Fatalf("minified code shows a window around the column, got %q", got)
 	}
-	if sourceContext(short, 99, 1) != "" {
+	if sourceContext(short, 99, 1, 1, 0) != "" {
 		t.Fatal("out-of-range line must render nothing")
 	}
 }
@@ -497,5 +502,24 @@ func TestHeatmapPicksColumnWidth(t *testing.T) {
 	}
 	if _, err := BuildHeatmap(strings.NewReader(`{"traceEvents":[]}`), 0); err == nil || !strings.Contains(err.Error(), "no main-thread activity") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// TestSourceContextForInlineScripts: an inline <script> starts partway down
+// its HTML page, and pause positions count lines from the top of the page.
+func TestSourceContextForInlineScripts(t *testing.T) {
+	t.Parallel()
+	src := "function later() {\n  return document.title;\n}\nlater();"
+	got := sourceContext(src, 22, 3, 21, 8) // the script starts at page line 21
+	for _, want := range []string{"    21  function later() {", "►   22    return document.title;", "    24  later();"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if got := numberLinesAt(src, 21, 23, 24, 0); got != "    23  }\n    24  later();" {
+		t.Errorf("numberLinesAt: %q", got)
+	}
+	if sourceContext(src, 5, 1, 21, 0) != "" {
+		t.Error("a line before the script has no context")
 	}
 }
