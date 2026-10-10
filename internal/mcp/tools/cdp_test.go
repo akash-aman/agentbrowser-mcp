@@ -13,7 +13,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecdp"
 )
 
 const fakePageURL = "http://fake/"

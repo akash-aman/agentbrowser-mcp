@@ -8,7 +8,7 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/cdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/cdp"
 )
 
 // ErrNoCoverage is returned when stopping coverage that was never started.

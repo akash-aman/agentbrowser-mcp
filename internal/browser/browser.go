@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
 )
 
 // Session tracks an active agent-browser session. An empty Name is the CLI's

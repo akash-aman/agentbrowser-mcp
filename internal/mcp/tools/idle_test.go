@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
 )
 
 const restartedWant = "Note: this session's browser had closed since its last use (browsers close after 15m without commands), so this call started a fresh one; earlier tabs, page state and @refs are gone."

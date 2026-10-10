@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecli"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/browser"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecli"
 )
 
 // TestMain lets the test binary act as the fake agent-browser CLI, or as the

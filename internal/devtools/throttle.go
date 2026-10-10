@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/cdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/cdp"
 )
 
 // Throttle is the network and CPU throttling applied to a page. Zero values

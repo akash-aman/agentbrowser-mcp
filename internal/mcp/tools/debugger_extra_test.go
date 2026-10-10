@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecdp"
 )
 
 // debuggerExtraFixture covers live edit, restart frame, function breakpoints

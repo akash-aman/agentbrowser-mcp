@@ -9,10 +9,10 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecdp"
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecli"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/browser"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecli"
 )
 
 func TestMain(m *testing.M) {

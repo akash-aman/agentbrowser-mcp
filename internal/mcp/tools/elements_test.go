@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/devtools"
-	"github.com/vercel-labs/agent-browser-mcp/internal/testutil/fakecdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/devtools"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/testutil/fakecdp"
 )
 
 var cssOverviewFixture = a{

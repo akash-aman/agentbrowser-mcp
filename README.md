@@ -112,7 +112,7 @@ Use Claude in Chrome for tasks in your own browser and quick checks of a page. U
 2. Build the server (Go 1.26+):
 
    ```bash
-   git clone https://github.com/akash-aman/agentbrowser-mcp.git
+   git clone https://github.com/xcode-studio/agentbrowser-mcp.git
    cd agentbrowser-mcp
    go build -o agent-browser-mcp .
    ```
@@ -304,7 +304,7 @@ go build -o agent-browser-mcp . && go run docs/demo/main.go   # re-record the de
 
 ## 🤝 Contributing
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/akash-aman/agentbrowser-mcp/issues).
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/xcode-studio/agentbrowser-mcp/issues).
 
 ## 📝 License
 

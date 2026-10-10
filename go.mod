@@ -1,4 +1,4 @@
-module github.com/vercel-labs/agent-browser-mcp
+module github.com/xcode-studio/agentbrowser-mcp
 
 go 1.26.1
 

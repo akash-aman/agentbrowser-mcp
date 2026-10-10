@@ -16,7 +16,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/browser"
 )
 
 const fixturePage = `<!doctype html><title>Fixture</title>

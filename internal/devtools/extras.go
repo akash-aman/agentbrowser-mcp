@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/cdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/cdp"
 )
 
 // animationsJS lists the running animations and transitions, like the

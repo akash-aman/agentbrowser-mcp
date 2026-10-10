@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
 )
 
 var sentenceEnd = regexp.MustCompile(`[.!?](\s|$)`)

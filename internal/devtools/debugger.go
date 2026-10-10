@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/cdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/cdp"
 )
 
 // ErrNotPaused is returned by operations that need a paused page.

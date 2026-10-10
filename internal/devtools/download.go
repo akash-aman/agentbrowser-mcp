@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/cdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/cdp"
 )
 
 // SeparateContext returns the page's browser context when it is not the

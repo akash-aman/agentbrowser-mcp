@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/browser"
-	"github.com/vercel-labs/agent-browser-mcp/internal/config"
-	"github.com/vercel-labs/agent-browser-mcp/internal/mcp/tools"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/browser"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/config"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/mcp/tools"
 )
 
 func TestInstructionsContainTriageAndEfficiencyRules(t *testing.T) {

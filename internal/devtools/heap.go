@@ -11,7 +11,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/vercel-labs/agent-browser-mcp/internal/cdp"
+	"github.com/xcode-studio/agentbrowser-mcp/internal/cdp"
 )
 
 // HeapSummary describes a heap snapshot without loading it in DevTools.
